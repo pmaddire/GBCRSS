@@ -1,0 +1,1 @@
+"""Coverage integration package."""

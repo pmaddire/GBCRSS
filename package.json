@@ -1,0 +1,13 @@
+{
+  "name": "gcie",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GraphCode Intelligence Engine CLI",
+  "bin": {
+    "gcie": "bin/gcie.js"
+  },
+  "scripts": {
+    "gcie": "node bin/gcie.js"
+  },
+  "license": "MIT"
+}
