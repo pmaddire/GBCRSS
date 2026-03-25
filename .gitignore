@@ -8,8 +8,17 @@ __pycache__/
 # Bench artifacts
 bench_*.py
 
-# Planning debug artifacts
-.planning/debug/
+# Planning/debug
+.planning/
+
+# GCIE cache
+.gcie/
+
+# Not required for runtime
+get-shit-done/
+tests/
+docs/
+performance/
 
 # OS
 .DS_Store

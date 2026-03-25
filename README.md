@@ -2,22 +2,50 @@
 
 GCIE is a graph-first code intelligence engine that minimizes LLM prompt context.
 
-## Quick Start
+## Quick Start (local)
 
 1. Create venv: `.venv\\Scripts\\python.exe -m venv .venv`
-2. Run tests: `.venv\\Scripts\\python.exe -m unittest`
-3. CLI help: `.venv\\Scripts\\python.exe -m cli.app --help`
+2. Install deps as needed (networkx, GitPython, typer):
+   `.venv\\Scripts\\python.exe -m pip install networkx GitPython typer`
+3. Run tests: `.venv\\Scripts\\python.exe -m unittest`
+4. CLI help: `.venv\\Scripts\\python.exe -m cli.app --help`
 
-## NPM Wrapper
+## NPM Wrapper (recommended)
 
 This repo includes a lightweight npm wrapper so you can run `gcie` like other npm CLIs.
 
-1. Install dependencies for Python as usual.
-2. Use one of these options:
-   - Local: `npm install` then `npx gcie --help`
-   - Global link: `npm link` then `gcie --help`
+1. In GCIE repo: `npm link`
+2. In target repo: `gcie --help`
 
-The wrapper automatically prefers `.venv` if present, and falls back to system Python.
+Local option:
+- `npm install` then `npx gcie --help`
+
+The wrapper prefers `.venv` in the GCIE repo and falls back to system Python.
+
+## Core Commands
+
+- `gcie index <path>`
+- `gcie query <file.py> "<question>"`
+- `gcie debug <file.py> "<question>"`
+- `gcie context <repo|file> "<task>" --budget auto --intent <edit|debug|refactor|explore>`
+
+## Agent Usage (context first)
+
+```
+gcie context . "<task>" --budget auto --intent <edit|debug|refactor|explore>
+```
+
+Use only the returned snippets as working context. If insufficient, increase budget or rerun.
+
+## Cache
+
+Repo-wide context is cached to speed up repeated calls.
+
+- `gcie cache-warm .`
+- `gcie cache-status .`
+- `gcie cache-clear .`
+
+Cache file: `.gcie/cache/context_cache.json` (auto-invalidated on file changes).
 
 ## Core Capabilities
 

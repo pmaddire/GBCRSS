@@ -3,12 +3,11 @@
 
 const { spawnSync } = require("child_process");
 const { existsSync } = require("fs");
-const { join } = require("path");
+const { join, resolve } = require("path");
 
-function resolvePython() {
-  const cwd = process.cwd();
-  const winVenv = join(cwd, ".venv", "Scripts", "python.exe");
-  const nixVenv = join(cwd, ".venv", "bin", "python");
+function resolvePython(gcieRoot) {
+  const winVenv = join(gcieRoot, ".venv", "Scripts", "python.exe");
+  const nixVenv = join(gcieRoot, ".venv", "bin", "python");
 
   if (existsSync(winVenv)) return winVenv;
   if (existsSync(nixVenv)) return nixVenv;
@@ -16,24 +15,28 @@ function resolvePython() {
   return null;
 }
 
-function tryCommand(cmd, args) {
-  const result = spawnSync(cmd, args, { stdio: "inherit" });
+function tryCommand(cmd, args, env) {
+  const result = spawnSync(cmd, args, { stdio: "inherit", env });
   return result.status === 0;
 }
 
 function main() {
   const args = process.argv.slice(2);
-  const venvPython = resolvePython();
+  const scriptDir = resolve(__dirname);
+  const gcieRoot = process.env.GCIE_ROOT ? resolve(process.env.GCIE_ROOT) : resolve(scriptDir, "..");
 
+  const env = { ...process.env };
+  env.PYTHONPATH = env.PYTHONPATH ? `${gcieRoot};${env.PYTHONPATH}` : gcieRoot;
+
+  const venvPython = resolvePython(gcieRoot);
   if (venvPython) {
-    process.exit(spawnSync(venvPython, ["-m", "cli.app", ...args], { stdio: "inherit" }).status || 0);
+    process.exit(spawnSync(venvPython, ["-m", "cli.app", ...args], { stdio: "inherit", env }).status || 0);
   }
 
-  // Fallbacks
-  if (tryCommand("python", ["-m", "cli.app", ...args])) return;
-  if (tryCommand("py", ["-3", "-m", "cli.app", ...args])) return;
+  if (tryCommand("python", ["-m", "cli.app", ...args], env)) return;
+  if (tryCommand("py", ["-3", "-m", "cli.app", ...args], env)) return;
 
-  console.error("No Python interpreter found. Create a .venv or install Python 3.11+.");
+  console.error("No Python interpreter found. Create a .venv in the GCIE repo or install Python 3.11+.");
   process.exit(1);
 }
 
