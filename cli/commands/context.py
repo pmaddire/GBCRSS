@@ -20,6 +20,37 @@ from scanner.repository_scanner import scan_repository
 # Simple in-process cache for repo-wide context builds
 _REPO_CACHE: dict[str, tuple[nx.DiGraph, dict[str, str], dict[str, str], dict[str, str]]] = {}
 
+_FRONTEND_EXTENSIONS = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".html",
+    ".vue",
+}
+
+_FRONTEND_KEYWORDS = {
+    "frontend",
+    "ui",
+    "ux",
+    "component",
+    "react",
+    "vue",
+    "svelte",
+    "angular",
+    "css",
+    "style",
+    "layout",
+    "toolbar",
+    "canvas",
+    "page",
+    "view",
+}
+
 
 def _snippet_from_lines(lines: list[str], max_lines: int) -> str:
     if not lines:
@@ -87,7 +118,17 @@ def _save_disk_cache(
 
 
 def _collect_repo_modules(repo_path: Path) -> tuple[list, dict, dict, dict, str, nx.DiGraph]:
-    config = ScannerConfig.from_extensions([".py", ".pyi"])
+    config = ScannerConfig.from_extensions([
+        ".py",
+        ".pyi",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".md",
+        ".txt",
+        *sorted(_FRONTEND_EXTENSIONS),
+    ])
     manifest = scan_repository(repo_path, config=config)
     signature = _repo_signature(repo_path, manifest.files)
 
@@ -111,41 +152,53 @@ def _collect_repo_modules(repo_path: Path) -> tuple[list, dict, dict, dict, str,
     function_snippets: dict[str, str] = {}
     class_snippets: dict[str, str] = {}
 
+    graph = nx.DiGraph()
+
     for entry in manifest.files:
-        if entry.suffix not in {".py", ".pyi"}:
-            continue
+        file_rel = entry.relative_path.as_posix()
         file_path = repo_path / entry.relative_path
+
         try:
             source = file_path.read_text(encoding="utf-8")
         except Exception:
             continue
 
-        file_rel = entry.relative_path.as_posix()
         file_text[file_rel] = source
-        module = parse_python_source(source, file=Path(file_rel))
-        modules.append(module)
 
-        lines = source.splitlines()
-        for fn in module.functions:
-            start = max(fn.start_line, 1)
-            end = max(fn.end_line, start)
-            snippet = "\n".join(lines[start - 1 : end]).strip()
-            node_id = f"function:{Path(fn.file).as_posix()}::{fn.name}"
-            if snippet:
-                function_snippets[node_id] = snippet
+        # Always add file node for retrieval targeting
+        file_node_id = f"file:{file_rel}"
+        graph.add_node(file_node_id, type="file", label=file_rel, path=file_rel)
 
-        for cls in module.classes:
-            start = max(cls.start_line, 1)
-            end = max(cls.end_line, start)
-            snippet = "\n".join(lines[start - 1 : end]).strip()
-            node_id = f"class:{Path(cls.file).as_posix()}::{cls.name}"
-            if snippet:
-                class_snippets[node_id] = snippet
+        if entry.suffix in {".py", ".pyi"}:
+            module = parse_python_source(source, file=Path(file_rel))
+            modules.append(module)
 
-    graph = nx.compose(
-        nx.compose(build_call_graph(modules), build_variable_graph(modules)),
-        build_code_structure_graph(modules),
-    )
+            lines = source.splitlines()
+            for fn in module.functions:
+                start = max(fn.start_line, 1)
+                end = max(fn.end_line, start)
+                snippet = "\n".join(lines[start - 1 : end]).strip()
+                node_id = f"function:{Path(fn.file).as_posix()}::{fn.name}"
+                if snippet:
+                    function_snippets[node_id] = snippet
+
+            for cls in module.classes:
+                start = max(cls.start_line, 1)
+                end = max(cls.end_line, start)
+                snippet = "\n".join(lines[start - 1 : end]).strip()
+                node_id = f"class:{Path(cls.file).as_posix()}::{cls.name}"
+                if snippet:
+                    class_snippets[node_id] = snippet
+
+    if modules:
+        graph = nx.compose(
+            graph,
+            nx.compose(
+                nx.compose(build_call_graph(modules), build_variable_graph(modules)),
+                build_code_structure_graph(modules),
+            ),
+        )
+
     _REPO_CACHE.clear()
     _REPO_CACHE[signature] = (graph, file_text, function_snippets, class_snippets)
     _save_disk_cache(
@@ -157,6 +210,22 @@ def _collect_repo_modules(repo_path: Path) -> tuple[list, dict, dict, dict, str,
         class_snippets=class_snippets,
     )
     return modules, file_text, function_snippets, class_snippets, signature, graph
+
+
+def _frontend_bias(query: str) -> bool:
+    text = query.lower()
+    return any(keyword in text for keyword in _FRONTEND_KEYWORDS)
+
+
+def _boost_score(node_id: str, base_score: float, query: str) -> float:
+    if not _frontend_bias(query):
+        return base_score
+    if node_id.startswith("file:"):
+        path = node_id[len("file:") :]
+        suffix = Path(path).suffix.lower()
+        if suffix in _FRONTEND_EXTENSIONS:
+            return base_score + 0.2
+    return base_score
 
 
 def run_context(path: str, query: str, budget: int | None, intent: str | None) -> dict:
@@ -203,7 +272,13 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None) -
             if text:
                 snippet = _snippet_from_lines(text.splitlines(), max_lines=120)
         if snippet:
-            ranked.append(RankedSnippet(node_id=c.node_id, content=snippet, score=c.score))
+            ranked.append(
+                RankedSnippet(
+                    node_id=c.node_id,
+                    content=snippet,
+                    score=_boost_score(c.node_id, c.score, query),
+                )
+            )
 
     payload = build_context(query, ranked, token_budget=budget, intent=intent)
 

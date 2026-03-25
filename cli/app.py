@@ -8,6 +8,7 @@ import typer
 
 from .commands.cache import cache_status, clear_cache, warm_cache
 from .commands.context import run_context
+from .commands.context_slices import run_context_slices
 from .commands.debug import run_debug
 from .commands.index import run_index
 from .commands.query import run_query
@@ -46,6 +47,34 @@ def context_cmd(
         budget_val = int(budget)
 
     result = run_context(path, query, budget=budget_val, intent=intent)
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("context-slices")
+def context_slices_cmd(
+    repo: str,
+    query: str,
+    profile: str | None = typer.Option("recall", "--profile"),
+    stage_a_budget: int = typer.Option(400, "--stage-a"),
+    stage_b_budget: int = typer.Option(800, "--stage-b"),
+    max_total: int = typer.Option(1200, "--max-total"),
+    intent: str | None = typer.Option(None, "--intent"),
+    pin: str | None = typer.Option(None, "--pin"),
+    pin_budget: int = typer.Option(300, "--pin-budget"),
+    include_tests: bool = typer.Option(False, "--include-tests"),
+) -> None:
+    result = run_context_slices(
+        repo,
+        query,
+        stage_a_budget=stage_a_budget,
+        stage_b_budget=stage_b_budget,
+        max_total=max_total,
+        intent=intent,
+        pin=pin,
+        pin_budget=pin_budget,
+        include_tests=include_tests,
+        profile=profile,
+    )
     typer.echo(json.dumps(result, indent=2))
 
 
