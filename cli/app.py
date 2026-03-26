@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import typer
 
@@ -14,6 +15,31 @@ from .commands.index import run_index
 from .commands.query import run_query
 
 app = typer.Typer(help="GraphCode Intelligence Engine CLI")
+
+
+def _query_tokens(query: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-zA-Z_./{}-][a-zA-Z0-9_./{}-]*", query.lower()))
+
+
+def _auto_context_budget(query: str, intent: str | None) -> int | None:
+    tokens = _query_tokens(query)
+    file_terms = [token for token in tokens if "." in token or "/" in token or "{" in token]
+    symbol_terms = [token for token in tokens if any(ch in token for ch in ("_", "/", ".", "{", "}"))]
+    explicit_files = [token for token in file_terms if token.endswith((".py", ".jsx", ".js", ".tsx", ".ts", ".html"))]
+    cross_layer = any(token.startswith(("frontend/", "frontend\\")) for token in file_terms) and any(
+        token.endswith(".py") or token.startswith(("backend/", "server/", "api/")) for token in file_terms
+    )
+    has_api = any("/api/" in token for token in file_terms) or "/api/" in query.lower()
+    effective_intent = intent or "explore"
+
+    if effective_intent in {"edit", "debug", "refactor"} and cross_layer and len(symbol_terms) >= 4:
+        return 1200
+    if effective_intent in {"edit", "debug"} and (len(explicit_files) >= 2 and len(symbol_terms) >= 4):
+        return 1200 if has_api else 1000
+    if effective_intent == "refactor" and len(explicit_files) >= 2:
+        return 1000
+    return None
+
 
 
 @app.command("index")
@@ -42,7 +68,7 @@ def context_cmd(
     intent: str | None = typer.Option(None, "--intent"),
 ) -> None:
     if budget == "auto":
-        budget_val = None
+        budget_val = _auto_context_budget(query, intent)
     else:
         budget_val = int(budget)
 

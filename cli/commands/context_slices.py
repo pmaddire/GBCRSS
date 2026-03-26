@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import re
+import json
 
 from llm_context.snippet_selector import estimate_tokens
+
+from context.context_router import route_context
 
 from .context import run_context
 
@@ -200,6 +205,97 @@ def _dedupe_by_file(snippets: list[dict]) -> list[dict]:
     return sorted(best.values(), key=lambda s: s.get("score", 0.0), reverse=True)
 
 
+_EXCLUDE_GLOBS = ["!**/.gcie/**", "!**/.git/**", "!**/.venv/**", "!**/node_modules/**"]
+_INCLUDE_GLOBS = ["**/*.py", "**/*.md", "**/*.js", "**/*.ts", "**/*.tsx"]
+
+
+def _rg_top_files(query: str, top_n: int = 5) -> list[str]:
+    terms = [t for t in re.split(r"[^A-Za-z0-9_]+", query.lower()) if len(t) >= 3]
+    if not terms:
+        return []
+    pattern = "|".join(re.escape(t) for t in sorted(set(terms)))
+    cmd = ["rg", "--count", "-i", pattern]
+    for g in _INCLUDE_GLOBS:
+        cmd.extend(["-g", g])
+    for g in _EXCLUDE_GLOBS:
+        cmd.extend(["-g", g])
+    cmd.append(".")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except Exception:
+        return []
+    counts = {}
+    for line in proc.stdout.splitlines():
+        if ":" not in line:
+            continue
+        path, count = line.rsplit(":", 1)
+        try:
+            counts[path] = int(count.strip())
+        except ValueError:
+            continue
+    ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    return [path for path, _ in ranked[:top_n]]
+
+
+
+def _index_files_for_query(query: str) -> list[str]:
+    index_path = Path(".gcie") / "architecture_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    tokens = [t for t in re.split(r"[^A-Za-z0-9_]+", query.lower()) if len(t) >= 3]
+    if not tokens:
+        return []
+    files: list[str] = []
+    for subsystem in data.get("subsystems", []):
+        name = (subsystem.get("name") or "").lower()
+        if not name:
+            continue
+        key_files = subsystem.get("key_files", []) or []
+        if any(token in name or name in token for token in tokens):
+            for path in key_files:
+                files.append(path)
+            continue
+        if any(token in (path.lower()) for path in key_files for token in tokens):
+            for path in key_files:
+                files.append(path)
+
+    file_map = data.get("file_map", {})
+    for path in file_map.keys():
+        lowered = path.lower()
+        if any(token in lowered for token in tokens):
+            files.append(path)
+
+    return files
+def _file_snippet(path: Path, max_lines: int = 120) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    return "\n".join(lines[:max_lines]).strip()
+
+
+def _merge_snippets(existing: list[dict], extra: list[dict], max_total: int) -> list[dict]:
+    by_id: dict[str, dict] = {item.get("node_id", ""): item for item in existing}
+    for item in extra:
+        node_id = item.get("node_id", "")
+        if node_id and node_id not in by_id:
+            by_id[node_id] = item
+    merged = list(by_id.values())
+    merged.sort(key=lambda s: s.get("score", 0.0), reverse=True)
+    out: list[dict] = []
+    used = 0
+    for item in merged:
+        tokens = estimate_tokens(item.get("content", ""))
+        if used + tokens > max_total:
+            continue
+        out.append(item)
+        used += tokens
+    return out
+
 def _total_tokens(snippets: list[dict]) -> int:
     return sum(estimate_tokens(item.get("content", "")) for item in snippets)
 
@@ -344,6 +440,76 @@ def run_context_slices(
         include_tests=include_tests,
     )
 
+    payload = route_context(
+        repo,
+        query,
+        intent=intent,
+        max_total=max_total,
+        profile=profile_used,
+        normal_runner=lambda: run_context_slices_normal(
+            repo,
+            query,
+            stage_a_budget=stage_a_budget,
+            stage_b_budget=stage_b_budget,
+            max_total=max_total,
+            intent=intent,
+            pin=pin,
+            pin_budget=pin_budget,
+            include_tests=include_tests,
+            profile=profile_used,
+        ),
+    )
+
+    if payload.get("mode") == "normal" and payload.get("fallback_reason"):
+        direct = run_context(repo, query, budget=max_total * 2, intent=intent, top_k=60)
+        snippets = direct.get("snippets", [])
+        extra = []
+        index_files = _index_files_for_query(query)
+        if index_files:
+            for rel in index_files:
+                path = Path(rel)
+                if not path.exists():
+                    continue
+                content = _file_snippet(path)
+                if content:
+                    extra.append({"node_id": f"file:{rel}", "score": 0.9, "content": content})
+        else:
+            for rel in _rg_top_files(query, top_n=12):
+                path = Path(rel)
+                if not path.exists():
+                    continue
+                content = _file_snippet(path)
+                if content:
+                    extra.append({"node_id": f"file:{rel}", "score": 0.2, "content": content})
+        snippets = _merge_snippets(snippets, extra, max_total=max_total * 2)
+
+        payload = {
+            "query": direct.get("query", query),
+            "profile": profile_used,
+            "mode": "direct",
+            "intent": intent,
+            "snippets": snippets,
+            "token_estimate": _total_tokens(snippets),
+            "fallback_reason": payload.get("fallback_reason"),
+            "secondary_fallback": "normal_empty",
+        }
+
+    return payload
+
+
+def run_context_slices_normal(
+    repo: str,
+    query: str,
+    *,
+    stage_a_budget: int,
+    stage_b_budget: int,
+    max_total: int,
+    intent: str | None,
+    pin: str | None,
+    pin_budget: int,
+    include_tests: bool,
+    profile: str | None,
+) -> dict:
     repo_path = Path(repo)
 
     slices = []
@@ -424,7 +590,8 @@ def run_context_slices(
 
     return {
         "query": query,
-        "profile": profile_used,
+        "profile": profile,
+        "mode": "normal",
         "stage_a_budget": stage_a_budget,
         "stage_b_budget": stage_b_budget,
         "max_total_tokens": max_total,
@@ -433,3 +600,18 @@ def run_context_slices(
         "snippets": trimmed,
         "token_estimate": _total_tokens(trimmed),
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

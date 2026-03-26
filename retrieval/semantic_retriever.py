@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from embeddings.encoder import TextEncoder
-from embeddings.faiss_index import SearchHit, VectorIndex
+from embeddings.faiss_index import VectorIndex
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticCandidate:
+    idx: int
     text: str
     score: float
 
@@ -33,6 +34,6 @@ class SemanticRetriever:
         for hit in hits:
             if hit.idx < 0 or hit.idx >= len(self._snippets):
                 continue
-            out.append(SemanticCandidate(text=self._snippets[hit.idx], score=hit.score))
+            out.append(SemanticCandidate(idx=hit.idx, text=self._snippets[hit.idx], score=hit.score))
 
         return tuple(out)

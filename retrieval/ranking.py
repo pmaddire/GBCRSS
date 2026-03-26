@@ -13,6 +13,9 @@ class HybridScore:
     semantic_score: float | None
     git_recency: float | None
     coverage_risk: float | None
+    lexical_overlap: int = 0
+    path_relevance: float = 0.0
+    semantic_hits: int = 0
 
 
 def combine_score(
