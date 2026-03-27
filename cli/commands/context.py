@@ -1,4 +1,4 @@
-"""CLI command: context."""
+﻿"""CLI command: context."""
 
 from __future__ import annotations
 
@@ -140,6 +140,16 @@ _QUERY_ALIASES = {
     "builder": ("build", "index", "context"),
     "builders": ("builder", "build", "index", "context"),
     "build": ("builder", "context"),
+    "plan": ("planner", "pipeline", "stage"),
+    "planner": ("plan", "pipeline", "stage"),
+    "convert": ("conversion", "api", "route"),
+    "conversion": ("convert", "api", "route"),
+    "analyze": ("analysis", "pipeline", "stage"),
+    "analysis": ("analyze", "pipeline", "stage"),
+    "extract": ("extraction", "pipeline", "stage"),
+    "extraction": ("extract", "pipeline", "stage"),
+    "stage": ("pipeline", "plan", "build"),
+    "stages": ("stage", "pipeline", "plan", "build"),
     "scanning": ("scanner", "scan", "repository"),
     "scanner": ("scanning", "scan", "repository"),
     "tracing": ("trace", "tracer", "execution"),
@@ -149,6 +159,41 @@ _QUERY_ALIASES = {
     "wiring": ("app", "main", "entry", "route", "router"),
 }
 
+_GENERIC_ENTRYPOINT_STEMS = {"main", "index", "app"}
+_GENERIC_ENTRYPOINT_PATHS = {
+    "frontend/src/main.jsx",
+    "frontend/index.html",
+}
+_BACKEND_PATH_HINTS = ("backend/", "server/", "api/", "services/", "service/", "workers/", "worker/")
+_BACKEND_FILE_HINTS = (
+    "client",
+    "service",
+    "worker",
+    "controller",
+    "handler",
+    "router",
+    "route",
+    "config",
+    "settings",
+    "pipeline",
+    "plan",
+    "build",
+    "extract",
+    "analyze",
+)
+_CHAIN_TERMS = {
+    "stage",
+    "stages",
+    "pipeline",
+    "plan",
+    "planner",
+    "build",
+    "builder",
+    "convert",
+    "analyze",
+    "extract",
+    "workflow",
+}
 _COMMON_FAMILY_TOKENS = {
     "src",
     "tests",
@@ -397,20 +442,238 @@ def _layer_bucket(path: str | None) -> str:
     return candidate.stem.lower()
 
 
+
+def _is_edit_like_query(query: str, intent: str | None) -> bool:
+    effective = _effective_intent(query, intent)
+    if effective in {"edit", "refactor"}:
+        return True
+    lowered = query.lower()
+    return any(term in lowered for term in ("fix", "modify", "patch", "rename", "update", "change"))
+
+
+def _is_backend_path(path: str) -> bool:
+    lowered = path.lower().replace("\\", "/")
+    if lowered.startswith(_BACKEND_PATH_HINTS):
+        return True
+    tokens = _family_tokens(path) | {Path(path).stem.lower()}
+    return bool(tokens & set(_BACKEND_FILE_HINTS))
+
+
+def _query_shape(query: str, intent: str | None, explicit_paths: set[str]) -> str:
+    terms = _query_terms(query)
+    effective = _effective_intent(query, intent)
+    lowered = query.lower()
+    explicit_layers = {_layer_bucket(path) for path in explicit_paths}
+    explicit_count = len(explicit_paths)
+
+    has_frontend = any(layer == "frontend" for layer in explicit_layers) or "frontend/" in lowered
+    has_backend = any(layer in {"backend", "api"} for layer in explicit_layers) or any(
+        hint in lowered for hint in ("/api/", "app.py", "main.py", "backend")
+    )
+    has_chain_terms = bool(terms & _CHAIN_TERMS)
+
+    if explicit_count >= 4 or (explicit_count >= 3 and has_chain_terms):
+        return "multi_hop_chain"
+    if has_frontend and has_backend:
+        return "cross_layer_ui_api"
+    if has_chain_terms and ("build" in terms or "planner" in terms or "stage" in terms):
+        return "builder_orchestrator"
+
+    backend_explicit = [path for path in explicit_paths if _is_backend_path(path)]
+    if len(backend_explicit) >= 2 and effective in {"explore", "debug", "edit", "refactor"}:
+        return "backend_config_pair"
+
+    if explicit_count == 1:
+        return "single_file"
+
+    if explicit_count >= 2:
+        families = {_candidate_family(path) for path in explicit_paths}
+        if len(families) == 1:
+            return "same_layer_pair"
+
+    return "single_file"
+
+
+def _is_generic_entrypoint(path: str) -> bool:
+    normalized = path.lower().replace("\\", "/")
+    candidate = Path(path)
+    if normalized in _GENERIC_ENTRYPOINT_PATHS:
+        return True
+    if candidate.stem.lower() in _GENERIC_ENTRYPOINT_STEMS:
+        return True
+    return False
+
+
+def _candidate_role(
+    path: str | None,
+    query: str,
+    query_shape: str,
+    explicit_targets: set[str],
+    strong_paths: list[str],
+) -> str:
+    if not path:
+        return "support_config"
+
+    normalized = path.lower().replace("\\", "/")
+    candidate = Path(path)
+    stem = candidate.stem.lower()
+    role = _file_role(path)
+
+    if path in explicit_targets:
+        return "explicit_target"
+    if _is_generic_entrypoint(path):
+        return "generic_entrypoint"
+    if role in {"app", "main", "index", "router", "route", "entry", "command"}:
+        return "caller_or_entry"
+
+    if query_shape == "multi_hop_chain":
+        tokens = _family_tokens(path)
+        if tokens & {"plan", "build", "stage", "pipeline", "extract", "analyze"} and stem not in _GENERIC_ENTRYPOINT_STEMS:
+            return "intermediate_pipeline"
+
+    if _is_backend_path(path):
+        for anchor in strong_paths:
+            if not _is_backend_path(anchor):
+                continue
+            anchor_path = Path(anchor)
+            if candidate.parent == anchor_path.parent and path != anchor:
+                return "sibling_module"
+
+    suffix = candidate.suffix.lower()
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".css", ".scss", ".sass", ".less", ".html"}:
+        return "support_config"
+
+    if "config" in normalized or "settings" in normalized or any(hint in normalized for hint in ("tailwind", "vite", "postcss", "vercel", "package.json")):
+        return "support_config"
+
+    return "sibling_module"
+
+
+def _role_adjustment(role: str, query_shape: str, query: str, intent: str | None) -> float:
+    effective = _effective_intent(query, intent)
+    if role == "explicit_target":
+        if _is_edit_like_query(query, intent):
+            return 0.95
+        return 0.55
+    if role == "generic_entrypoint":
+        if _is_edit_like_query(query, intent):
+            return -0.4
+        if query_shape in {"multi_hop_chain", "builder_orchestrator"}:
+            return -0.12
+        return -0.24
+    if role == "sibling_module":
+        if query_shape in {"backend_config_pair", "same_layer_pair"}:
+            return 0.18
+        return 0.08
+    if role == "caller_or_entry":
+        if query_shape in {"cross_layer_ui_api", "multi_hop_chain", "builder_orchestrator"}:
+            return 0.16
+        return 0.04
+    if role == "intermediate_pipeline":
+        if query_shape == "multi_hop_chain":
+            return 0.3
+        if query_shape == "builder_orchestrator":
+            return 0.16
+        return 0.08
+    if role == "support_config":
+        if effective == "debug":
+            return -0.28
+        if effective in {"edit", "refactor"}:
+            return -0.16
+        return -0.12
+    return 0.0
+
+
+
+def _subtree_locality_adjustment(path: str | None, explicit_targets: set[str], query_shape: str) -> float:
+    if not path or not explicit_targets:
+        return 0.0
+    explicit_roots = {Path(item).parts[0].lower() for item in explicit_targets if Path(item).parts}
+    explicit_families = {_candidate_family(item) for item in explicit_targets}
+    candidate = Path(path)
+    candidate_root = candidate.parts[0].lower() if candidate.parts else ""
+    candidate_family = _candidate_family(path)
+
+    if path in explicit_targets or candidate_family in explicit_families:
+        return 0.12
+    if query_shape in {"cross_layer_ui_api", "backend_config_pair"}:
+        if candidate_root in explicit_roots:
+            return 0.03
+        return -0.08
+    if len(explicit_roots) == 1:
+        return -0.14 if candidate_root not in explicit_roots else 0.02
+    return -0.04
+
+
+def _support_config_penalty(path: str | None, role: str, explicit_targets: set[str]) -> float:
+    if not path or not explicit_targets:
+        return 0.0
+    if role not in {"support_config", "general_doc", "operational_doc"}:
+        return 0.0
+    candidate_family = _candidate_family(path)
+    explicit_families = {_candidate_family(item) for item in explicit_targets}
+    if candidate_family in explicit_families:
+        return -0.08
+    return -0.26
+
+
+def _promote_priority_first(
+    ranked: list[RankedSnippet],
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+) -> list[RankedSnippet]:
+    explicit_priority_ids = set(explicit_priority_ids)
+    linked_priority_ids = set(linked_priority_ids)
+    chain_priority_ids = set(chain_priority_ids)
+    return sorted(
+        ranked,
+        key=lambda item: (
+            0 if item.node_id in explicit_priority_ids else 1,
+            0 if item.node_id in linked_priority_ids else 1,
+            0 if item.node_id in chain_priority_ids else 1,
+            0 if item.node_id.startswith("file:") else 1,
+            -item.score,
+            item.node_id,
+        ),
+    )
+
+def _family_competition_adjustment(path: str | None, explicit_targets: set[str], query_shape: str) -> float:
+    if not path or not explicit_targets:
+        return 0.0
+    explicit_families = {_candidate_family(item) for item in explicit_targets}
+    family = _candidate_family(path)
+    if family in explicit_families:
+        return 0.16
+    if query_shape in {"cross_layer_ui_api", "same_layer_pair", "backend_config_pair"}:
+        return -0.06
+    return -0.02
+
 def _entrypoint_penalty(path: str, explicit_targets: set[str]) -> float:
     if not explicit_targets:
         return 0.0
-    candidate = Path(path)
-    if candidate.stem.lower() not in {"main", "index"}:
+    if not _is_generic_entrypoint(path):
         return 0.0
+
+    candidate = Path(path)
     candidate_layer = _layer_bucket(path)
-    if any(_layer_bucket(target) == candidate_layer and Path(target).name.lower() != candidate.name.lower() for target in explicit_targets):
+    candidate_family = _candidate_family(path)
+    has_stronger_peer = any(
+        target != path
+        and (_layer_bucket(target) == candidate_layer or _candidate_family(target) == candidate_family)
+        and not _is_generic_entrypoint(target)
+        for target in explicit_targets
+    )
+    if has_stronger_peer:
+        if candidate.stem.lower() in {"main", "app"}:
+            return 0.34
         return 0.28
     return 0.0
 
 
-def _explicit_priority_ids(file_text: dict[str, str], query: str) -> set[str]:
-    return {f"file:{path}" for score, path in _mentioned_file_paths(file_text, query) if score >= 0.75}
+def _explicit_priority_ids(file_text: dict[str, str], query: str, intent: str | None = None) -> set[str]:
+    threshold = 0.5 if _is_edit_like_query(query, intent) else 0.75
+    return {f"file:{path}" for score, path in _mentioned_file_paths(file_text, query) if score >= threshold}
 
 
 def _layer_priority_ids(ranked: list[RankedSnippet], query: str, intent: str | None, explicit_priority_ids: set[str]) -> set[str]:
@@ -488,23 +751,36 @@ def _content_match_score(content: str, query: str) -> float:
 
 def _class_weight(path: str, query: str, intent: str | None) -> float:
     file_class = _classify_path(path)
+    lowered_path = path.lower().replace("\\", "/")
     effective_intent = _effective_intent(query, intent)
     if effective_intent == "debug":
         if file_class == "code":
             return 0.4
+        if "get-shit-done/" in lowered_path:
+            return -0.45
         if file_class == "operational_doc":
+            if "/templates/" in lowered_path:
+                return -0.28
             return 0.12
         return -0.35
     if effective_intent == "explore":
         if file_class == "code":
             return 0.18
+        if "get-shit-done/" in lowered_path:
+            return -0.32
         if file_class == "operational_doc":
+            if "/templates/" in lowered_path:
+                return -0.2
             return 0.22
         return -0.05
     if effective_intent == "refactor":
         if file_class == "code":
             return 0.3
+        if "get-shit-done/" in lowered_path:
+            return -0.3
         if file_class == "operational_doc":
+            if "/templates/" in lowered_path:
+                return -0.18
             return 0.1
         return -0.15
     if file_class == "code":
@@ -550,6 +826,7 @@ def _adjacency_boost(
     current = Path(path)
     current_tokens = _family_tokens(path)
     current_class = _classify_path(path)
+    terms = _query_terms(query)
     bonus = 0.0
     reference_tokens = _reference_tokens(path)
     for matched in strong_paths:
@@ -563,6 +840,8 @@ def _adjacency_boost(
             bonus += 0.06
         if current.parent == matched_path.parent:
             bonus += 0.08
+        if _is_backend_path(path) and _is_backend_path(matched) and current.parent == matched_path.parent and (terms & current_tokens):
+            bonus += 0.18
         matched_text = file_text.get(matched, "").lower()
         if matched_text and any(token in matched_text for token in reference_tokens):
             bonus += 0.16
@@ -611,7 +890,10 @@ def _mandatory_node_ids(
         if not item.node_id.startswith("file:"):
             continue
         path = item.node_id[len("file:") :]
-        if _classify_path(path) == "general_doc" and _effective_intent(query, intent) == "debug":
+        file_class = _classify_path(path)
+        if file_class == "general_doc" and _effective_intent(query, intent) == "debug":
+            continue
+        if file_class != "code" and item.node_id not in (explicit_priority_ids or set()):
             continue
         if _path_match_score(path, query) + _class_weight(path, query, intent) >= 0.45:
             mandatory.add(item.node_id)
@@ -621,6 +903,76 @@ def _mandatory_node_ids(
             mandatory.add(item.node_id)
     return mandatory
 
+
+
+def _linked_file_priority_ids(
+    ranked: list[RankedSnippet],
+    explicit_priority_ids: set[str],
+    query_shape: str,
+    query: str,
+    intent: str | None,
+) -> set[str]:
+    if not explicit_priority_ids:
+        return set()
+    if not _is_edit_like_query(query, intent):
+        return set()
+    if query_shape not in {"same_layer_pair", "cross_layer_ui_api", "backend_config_pair", "builder_orchestrator"}:
+        return set()
+
+    keep = {
+        item.node_id
+        for item in sorted(ranked, key=lambda snippet: (-snippet.score, snippet.node_id))
+        if item.node_id in explicit_priority_ids
+    }
+    return set(sorted(keep)[:3])
+
+
+def _chain_quota_priority_ids(
+    ranked: list[RankedSnippet],
+    query: str,
+    intent: str | None,
+    explicit_targets: set[str],
+) -> set[str]:
+    query_shape = _query_shape(query, intent, explicit_targets)
+    if query_shape not in {"multi_hop_chain", "builder_orchestrator"}:
+        return set()
+
+    file_candidates = [item for item in ranked if item.node_id.startswith("file:") and _classify_path(item.node_id[5:]) == "code"]
+    if not file_candidates:
+        return set()
+
+    sorted_candidates = sorted(file_candidates, key=lambda item: (-item.score, item.node_id))
+    caller = next(
+        (
+            item.node_id
+            for item in sorted_candidates
+            if _candidate_role(item.node_id[5:], query, query_shape, explicit_targets, []) in {"caller_or_entry", "generic_entrypoint"}
+        ),
+        None,
+    )
+
+    middle = next(
+        (
+            item.node_id
+            for item in sorted_candidates
+            if _candidate_role(item.node_id[5:], query, query_shape, explicit_targets, []) in {"intermediate_pipeline", "sibling_module"}
+            and item.node_id != caller
+        ),
+        None,
+    )
+
+    downstream = next(
+        (
+            item.node_id
+            for item in sorted_candidates
+            if item.node_id != caller and item.node_id != middle and (
+                item.node_id[5:] in explicit_targets or _candidate_role(item.node_id[5:], query, query_shape, explicit_targets, []) != "generic_entrypoint"
+            )
+        ),
+        None,
+    )
+
+    return {node_id for node_id in (caller, middle, downstream) if node_id}
 
 def _collect_repo_modules(repo_path: Path) -> tuple[list, dict, dict, dict, str, nx.DiGraph]:
     config = ScannerConfig.from_extensions(
@@ -1276,6 +1628,7 @@ def _file_channel_candidates(
 def _explicit_file_channel_candidates(
     file_text: dict[str, str],
     query: str,
+    intent: str | None,
     *,
     limit: int = 8,
 ) -> list[_ChannelCandidate]:
@@ -1289,7 +1642,7 @@ def _explicit_file_channel_candidates(
                 node_id=f"file:{rel_path}",
                 channel="target",
                 score=score + 1.0,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=220 if _is_edit_like_query(query, intent) else 120),
                 rationale=f"explicit_file={score:.2f}",
             )
         )
@@ -1329,6 +1682,7 @@ def _fuse_context_channels(
     file_text: dict[str, str],
     *,
     explicit_targets: set[str] | None = None,
+    query_shape: str | None = None,
     limit: int = 48,
 ) -> tuple[list[RankedSnippet], dict[str, dict[str, object]]]:
     channel_weights = {
@@ -1341,6 +1695,7 @@ def _fuse_context_channels(
     }
     merged: dict[str, dict[str, object]] = {}
     explicit_targets = explicit_targets or set()
+    resolved_query_shape = query_shape or _query_shape(query, intent, explicit_targets)
 
     for channel_name in ("target", "lex", "vec", "expand", "adj", "fallback"):
         candidates = channel_map.get(channel_name, [])
@@ -1407,8 +1762,15 @@ def _fuse_context_channels(
             final_score += 0.14
         if "expand" in channels:
             final_score += 0.08
-        role = _file_role(path)
-        if role in _SUPPORT_ROLE_TOKENS and _support_promotion_enabled(query, intent):
+        base_role = _file_role(path)
+        candidate_role = "ranked"
+        if explicit_targets:
+            candidate_role = _candidate_role(path, query, resolved_query_shape, explicit_targets, strong_paths)
+            final_score += _role_adjustment(candidate_role, resolved_query_shape, query, intent)
+            final_score += _family_competition_adjustment(path, explicit_targets, resolved_query_shape)
+            final_score += _subtree_locality_adjustment(path, explicit_targets, resolved_query_shape)
+            final_score += _support_config_penalty(path, candidate_role, explicit_targets)
+        if base_role in _SUPPORT_ROLE_TOKENS and _support_promotion_enabled(query, intent):
             final_score += 0.1
 
         ranked.append(
@@ -1421,7 +1783,9 @@ def _fuse_context_channels(
         attached[node_id] = {
             "channels": list(channels[:4]),
             "family": _candidate_family(path),
-            "file_role": role,
+            "file_role": base_role,
+            "candidate_role": candidate_role,
+            "query_shape": resolved_query_shape,
             "file_class": _classify_path(path) if path else "unknown",
             "why_included": "+".join(channels) if channels else "ranked",
         }
@@ -1601,28 +1965,32 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
             if snippet:
                 class_snippets[node_id] = snippet
 
-    explicit_priority_ids = _explicit_priority_ids(file_text, query)
+    explicit_priority_ids = _explicit_priority_ids(file_text, query, intent)
     explicit_target_paths = {node_id[5:] for node_id in explicit_priority_ids if node_id.startswith("file:")}
+    query_shape = _query_shape(query, intent, explicit_target_paths)
     channels: dict[str, list[_ChannelCandidate]] = {
-        "target": _explicit_file_channel_candidates(file_text, query),
+        "target": _explicit_file_channel_candidates(file_text, query, intent),
         "vec": _vector_channel_candidates(graph, query, file_text, function_snippets, class_snippets, top_k=top_k),
         "lex": _file_channel_candidates(file_text, query, intent, channel="lex", limit=18),
         "expand": _file_channel_candidates(file_text, query, intent, channel="expand", limit=14),
     }
-    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths)
+    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths, query_shape=query_shape)
     anchor_paths = _top_anchor_paths(ranked)
     channels["adj"] = _file_channel_candidates(file_text, query, intent, channel="adj", anchor_paths=anchor_paths, limit=10)
-    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths)
+    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths, query_shape=query_shape)
 
     ranked, support_priority_ids = _collapse_support_query_snippets(ranked, query, intent, file_text)
     explicit_priority_ids = {candidate.node_id for candidate in channels.get("target", [])}
     explicit_priority_ids |= _layer_priority_ids(ranked, query, intent, explicit_priority_ids)
+    linked_priority_ids = _linked_file_priority_ids(ranked, explicit_priority_ids, query_shape, query, intent)
+    chain_priority_ids = _chain_quota_priority_ids(ranked, query, intent, explicit_target_paths)
+    ranked = _promote_priority_first(ranked, explicit_priority_ids, linked_priority_ids, chain_priority_ids)
     mandatory_node_ids = _mandatory_node_ids(
         ranked,
         query,
         intent,
-        support_priority_ids=support_priority_ids,
-        explicit_priority_ids=explicit_priority_ids,
+        support_priority_ids=support_priority_ids | linked_priority_ids | chain_priority_ids,
+        explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
     )
     payload = build_context(
         query,
@@ -1641,15 +2009,16 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         attached,
     )
     if fallback_priority_ids:
-        combined_priority_ids = support_priority_ids | fallback_priority_ids
+        combined_priority_ids = support_priority_ids | fallback_priority_ids | linked_priority_ids | chain_priority_ids
         ranked, support_priority_ids = _collapse_support_query_snippets(ranked, query, intent, file_text)
         combined_priority_ids |= support_priority_ids
+        ranked = _promote_priority_first(ranked, explicit_priority_ids, linked_priority_ids, chain_priority_ids)
         mandatory_node_ids = _mandatory_node_ids(
             ranked,
             query,
             intent,
             support_priority_ids=combined_priority_ids,
-            explicit_priority_ids=explicit_priority_ids,
+            explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
         )
         payload = build_context(
             query,
@@ -1841,3 +2210,32 @@ def run_context_adaptive(
     payload["adaptive_completion_reason"] = "missing_referenced_companion" if added else None
     payload["adaptive_missing_files"] = added
     return payload
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

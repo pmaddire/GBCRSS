@@ -1,0 +1,130 @@
+﻿# Potential Updates
+
+## Context
+
+Current state (from latest validation):
+
+- Hybrid workflow can reach very high recall when staged.
+- One-shot/root retrieval is still brittle in mixed-layer repos.
+- The best near-term target is improving efficiency without giving up coverage.
+
+## Candidate Updates
+
+### 1. Pivot + Skeleton Packaging
+
+What it is:
+- Keep full content for pivot files (must-have files).
+- Include only compact skeletons/signatures for adjacent support files.
+
+Why it helps:
+- Preserves correctness path while reducing token load from neighboring files.
+- Avoids paying full-file cost for files used only as context bridges.
+
+Risk:
+- Low to medium. Requires careful control so skeleton files are never used where full content is required.
+
+Expected impact:
+- High efficiency gain with low recall risk.
+
+---
+
+### 2. Path-Local First Expansion (Root Queries)
+
+What it is:
+- If query names explicit files, rank same-subtree candidates first.
+- Expand globally only when must-have coverage is still incomplete.
+
+Why it helps:
+- Reduces root-scope noise from generic/support files.
+- Aligns ranking to the strongest user-provided signal (explicit paths).
+
+Risk:
+- Medium. Needs guardrails for true cross-layer tasks.
+
+Expected impact:
+- High recall gain on root queries; moderate efficiency gain.
+
+---
+
+### 3. Dynamic Threshold Relaxation
+
+What it is:
+- Start retrieval strict.
+- Relax thresholds only if hit count/coverage is too low.
+
+Why it helps:
+- Keeps compact context on easy tasks.
+- Avoids over-expanding by default.
+
+Risk:
+- Medium. Can oscillate if thresholds are not stable.
+
+Expected impact:
+- Moderate efficiency gain; moderate stability gain.
+
+---
+
+### 4. Intent Pipeline Preset (Single Orchestration Mode)
+
+What it is:
+- One orchestrated mode that chooses strategy by intent and task shape.
+
+Why it helps:
+- Better UX and fewer manual tuning steps.
+
+Risk:
+- Medium to high. More moving parts and easier to regress.
+
+Expected impact:
+- High UX gain; uncertain near-term accuracy/efficiency gain.
+
+---
+
+### 5. Memory Budget Cap
+
+What it is:
+- Hard cap on memory/history context slice (for example 10%).
+
+Why it helps:
+- Prevents historical context from displacing code context.
+
+Risk:
+- Low.
+
+Expected impact:
+- Small to moderate efficiency gain.
+
+## Recommendation: Add Now
+
+### Add #1 first: Pivot + Skeleton Packaging
+
+This is the highest confidence next step right now.
+
+Why this makes the most sense immediately:
+
+1. It directly targets the current optimization goal: better efficiency without recall loss.
+2. It is incremental and low-risk compared with a broader orchestration rewrite.
+3. It complements the current hybrid workflow (which already identifies must-have pivots).
+4. It gives measurable gains quickly with a clear A/B test:
+   - same must-have coverage
+   - lower average tokens
+
+## Suggested Implementation Order
+
+1. Add file role marker in context packaging:
+   - `pivot` vs `adjacent_support`.
+2. For `adjacent_support`, package signatures/symbol blocks first.
+3. Keep full content for:
+   - explicit targets
+n   - chain middle files
+   - files selected by must-have gate.
+4. Run benchmark comparison:
+   - hybrid current vs hybrid + skeleton packaging
+   - compare average tokens, savings, accuracy, full-hit rate.
+
+## Success Criteria
+
+- No drop in full-hit rate.
+- No drop in average accuracy.
+- Average tokens reduced versus current hybrid workflow baseline.
+

@@ -1,4 +1,4 @@
-"""Typer entrypoint for GCIE CLI."""
+﻿"""Typer entrypoint for GCIE CLI."""
 
 from __future__ import annotations
 
@@ -23,23 +23,39 @@ def _query_tokens(query: str) -> tuple[str, ...]:
 
 def _auto_context_budget(query: str, intent: str | None) -> int | None:
     tokens = _query_tokens(query)
-    file_terms = [token for token in tokens if "." in token or "/" in token or "{" in token]
-    symbol_terms = [token for token in tokens if any(ch in token for ch in ("_", "/", ".", "{", "}"))]
-    explicit_files = [token for token in file_terms if token.endswith((".py", ".jsx", ".js", ".tsx", ".ts", ".html"))]
-    cross_layer = any(token.startswith(("frontend/", "frontend\\")) for token in file_terms) and any(
-        token.endswith(".py") or token.startswith(("backend/", "server/", "api/")) for token in file_terms
-    )
-    has_api = any("/api/" in token for token in file_terms) or "/api/" in query.lower()
+    lowered = query.lower()
     effective_intent = intent or "explore"
 
+    file_terms = [token for token in tokens if "." in token or "/" in token or "{" in token]
+    explicit_files = [token for token in file_terms if token.endswith((".py", ".jsx", ".js", ".tsx", ".ts", ".html"))]
+    symbol_terms = [token for token in tokens if any(ch in token for ch in ("_", "/", ".", "{", "}"))]
+
+    has_frontend = any(token.startswith(("frontend/", "frontend\\")) for token in file_terms)
+    has_backend = any(
+        token.endswith(".py") or token.startswith(("backend/", "server/", "api/"))
+        for token in file_terms
+    )
+    cross_layer = has_frontend and has_backend
+
+    stage_pipeline = any(term in lowered for term in ("stage", "pipeline", "planner", "plan", "build", "orchestr"))
+    backend_config = any(term in lowered for term in ("backend", "config", "openai", "api_key", "llm", "no_ai", "backend_info"))
+    ai_chain = any(term in lowered for term in ("openai", "llm", "model", "agent")) and has_backend
+    same_layer_backend_pair = len([token for token in explicit_files if token.endswith(".py")]) >= 2 and not has_frontend
+    has_api = "/api/" in lowered or any("/api/" in token for token in file_terms)
+
     if effective_intent in {"edit", "debug", "refactor"} and cross_layer and len(symbol_terms) >= 4:
+        return 1200 if has_api else 1150
+    if stage_pipeline and len(explicit_files) >= 2:
+        return 1400
+    if same_layer_backend_pair and (backend_config or ai_chain):
+        return 1100
+    if len(explicit_files) >= 3 and effective_intent in {"edit", "debug", "refactor"}:
         return 1200
-    if effective_intent in {"edit", "debug"} and (len(explicit_files) >= 2 and len(symbol_terms) >= 4):
-        return 1200 if has_api else 1000
+    if effective_intent in {"edit", "debug"} and len(explicit_files) >= 2:
+        return 1000
     if effective_intent == "refactor" and len(explicit_files) >= 2:
         return 1000
     return None
-
 
 
 @app.command("index")
@@ -124,3 +140,4 @@ def cache_warm_cmd(path: str = typer.Argument(".")) -> None:
 
 if __name__ == "__main__":
     app()
+
