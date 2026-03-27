@@ -1933,6 +1933,77 @@ def _apply_normal_search_fallback(
     return ranked, attached, fallback_ids, reason, True
 
 
+
+def _skeletonize_content(content: str, max_lines: int = 60) -> str:
+    lines = content.splitlines()
+    if len(lines) <= max_lines:
+        return content
+
+    signature_pattern = re.compile(r"^\s*(def\s+|class\s+|export\s+|function\s+|const\s+|let\s+|var\s+|@app\.route|if\s+__name__)", re.IGNORECASE)
+    selected: list[str] = []
+    for line in lines:
+        if signature_pattern.search(line):
+            selected.append(line)
+        if len(selected) >= max_lines:
+            break
+
+    if len(selected) < min(20, max_lines):
+        selected = lines[:max_lines]
+
+    return "\n".join(selected).strip()
+
+
+def _packaging_sets(
+    ranked: list[RankedSnippet],
+    attached: dict[str, dict[str, object]],
+    *,
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+    mandatory_node_ids: set[str],
+) -> tuple[set[str], set[str]]:
+    pivot_ids = set(explicit_priority_ids) | set(linked_priority_ids) | set(chain_priority_ids)
+    if not pivot_ids:
+        for item in ranked:
+            if item.node_id.startswith("file:"):
+                pivot_ids.add(item.node_id)
+            if len(pivot_ids) >= 2:
+                break
+
+    skeleton_ids: set[str] = set()
+    for item in ranked:
+        if not item.node_id.startswith("file:"):
+            continue
+        if item.node_id in pivot_ids or item.node_id in mandatory_node_ids:
+            continue
+        meta = attached.get(item.node_id, {})
+        role = meta.get("candidate_role") if isinstance(meta, dict) else None
+        if role in {"support_config", "sibling_module", "caller_or_entry", "generic_entrypoint"}:
+            skeleton_ids.add(item.node_id)
+    return pivot_ids, skeleton_ids
+
+
+def _apply_packaging(
+    ranked: list[RankedSnippet],
+    pivot_ids: set[str],
+    skeleton_ids: set[str],
+    *,
+    max_skeleton_lines: int = 60,
+) -> list[RankedSnippet]:
+    packed: list[RankedSnippet] = []
+    for item in ranked:
+        if item.node_id in skeleton_ids:
+            packed.append(
+                RankedSnippet(
+                    node_id=item.node_id,
+                    score=item.score,
+                    content=_skeletonize_content(item.content, max_lines=max_skeleton_lines),
+                )
+            )
+            continue
+        packed.append(item)
+    return packed
+
 def run_context(path: str, query: str, budget: int | None, intent: str | None, top_k: int = 40) -> dict:
     target = Path(path)
 
@@ -1968,16 +2039,31 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
     explicit_priority_ids = _explicit_priority_ids(file_text, query, intent)
     explicit_target_paths = {node_id[5:] for node_id in explicit_priority_ids if node_id.startswith("file:")}
     query_shape = _query_shape(query, intent, explicit_target_paths)
+
     channels: dict[str, list[_ChannelCandidate]] = {
         "target": _explicit_file_channel_candidates(file_text, query, intent),
         "vec": _vector_channel_candidates(graph, query, file_text, function_snippets, class_snippets, top_k=top_k),
         "lex": _file_channel_candidates(file_text, query, intent, channel="lex", limit=18),
         "expand": _file_channel_candidates(file_text, query, intent, channel="expand", limit=14),
     }
-    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths, query_shape=query_shape)
+    ranked, attached = _fuse_context_channels(
+        channels,
+        query,
+        intent,
+        file_text,
+        explicit_targets=explicit_target_paths,
+        query_shape=query_shape,
+    )
     anchor_paths = _top_anchor_paths(ranked)
     channels["adj"] = _file_channel_candidates(file_text, query, intent, channel="adj", anchor_paths=anchor_paths, limit=10)
-    ranked, attached = _fuse_context_channels(channels, query, intent, file_text, explicit_targets=explicit_target_paths, query_shape=query_shape)
+    ranked, attached = _fuse_context_channels(
+        channels,
+        query,
+        intent,
+        file_text,
+        explicit_targets=explicit_target_paths,
+        query_shape=query_shape,
+    )
 
     ranked, support_priority_ids = _collapse_support_query_snippets(ranked, query, intent, file_text)
     explicit_priority_ids = {candidate.node_id for candidate in channels.get("target", [])}
@@ -1985,6 +2071,7 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
     linked_priority_ids = _linked_file_priority_ids(ranked, explicit_priority_ids, query_shape, query, intent)
     chain_priority_ids = _chain_quota_priority_ids(ranked, query, intent, explicit_target_paths)
     ranked = _promote_priority_first(ranked, explicit_priority_ids, linked_priority_ids, chain_priority_ids)
+
     mandatory_node_ids = _mandatory_node_ids(
         ranked,
         query,
@@ -1992,9 +2079,20 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         support_priority_ids=support_priority_ids | linked_priority_ids | chain_priority_ids,
         explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
     )
+
+    pivot_node_ids, skeleton_node_ids = _packaging_sets(
+        ranked,
+        attached,
+        explicit_priority_ids=explicit_priority_ids,
+        linked_priority_ids=linked_priority_ids,
+        chain_priority_ids=chain_priority_ids,
+        mandatory_node_ids=mandatory_node_ids,
+    )
+    packed_ranked = _apply_packaging(ranked, pivot_node_ids, skeleton_node_ids)
+
     payload = build_context(
         query,
-        ranked,
+        packed_ranked,
         token_budget=budget,
         intent=intent,
         mandatory_node_ids=mandatory_node_ids,
@@ -2020,39 +2118,61 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
             support_priority_ids=combined_priority_ids,
             explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
         )
+        pivot_node_ids, skeleton_node_ids = _packaging_sets(
+            ranked,
+            attached,
+            explicit_priority_ids=explicit_priority_ids,
+            linked_priority_ids=linked_priority_ids,
+            chain_priority_ids=chain_priority_ids,
+            mandatory_node_ids=mandatory_node_ids,
+        )
+        packed_ranked = _apply_packaging(ranked, pivot_node_ids, skeleton_node_ids)
         payload = build_context(
             query,
-            ranked,
+            packed_ranked,
             token_budget=budget,
             intent=intent,
             mandatory_node_ids=mandatory_node_ids,
         )
 
+    snippets_out: list[dict[str, object]] = []
+    for snippet in payload.snippets:
+        base_meta = attached.get(
+            snippet.node_id,
+            {
+                "channels": [],
+                "family": _candidate_family(_node_file_path(snippet.node_id)),
+                "file_role": _file_role(_node_file_path(snippet.node_id)),
+                "candidate_role": "ranked",
+                "query_shape": query_shape,
+                "file_class": _classify_path(_node_file_path(snippet.node_id) or ""),
+                "why_included": "selected",
+            },
+        )
+        meta = dict(base_meta)
+        if snippet.node_id in pivot_node_ids:
+            meta["packaging_role"] = "pivot"
+        elif snippet.node_id in skeleton_node_ids:
+            meta["packaging_role"] = "adjacent_support"
+        else:
+            meta["packaging_role"] = "full"
+
+        snippets_out.append(
+            {
+                "node_id": snippet.node_id,
+                "score": snippet.score,
+                "content": snippet.content,
+                "attached_context": meta,
+            }
+        )
+
     return {
         "query": payload.query,
         "tokens": payload.total_tokens_estimate,
-        "snippets": [
-            {
-                "node_id": s.node_id,
-                "score": s.score,
-                "content": s.content,
-                "attached_context": attached.get(
-                    s.node_id,
-                    {
-                        "channels": [],
-                        "family": _candidate_family(_node_file_path(s.node_id)),
-                        "file_role": _file_role(_node_file_path(s.node_id)),
-                        "file_class": _classify_path(_node_file_path(s.node_id) or ""),
-                        "why_included": "selected",
-                    },
-                ),
-            }
-            for s in payload.snippets
-        ],
+        "snippets": snippets_out,
         "fallback_search_used": fallback_search_used,
         "fallback_reason": fallback_reason,
     }
-
 
 def _adaptive_companion_candidates(
     payload: dict,
@@ -2210,6 +2330,12 @@ def run_context_adaptive(
     payload["adaptive_completion_reason"] = "missing_referenced_companion" if added else None
     payload["adaptive_missing_files"] = added
     return payload
+
+
+
+
+
+
 
 
 
