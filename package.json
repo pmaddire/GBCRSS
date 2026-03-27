@@ -1,13 +1,14 @@
 {
-  "name": "gcie",
-  "version": "0.1.0",
-  "private": true,
-  "description": "GraphCode Intelligence Engine CLI",
+  "name": "@pmaddire/gcie",
+  "version": "0.1.4",
+  "description": "GraphCode Intelligence Engine one-command setup and context CLI",
   "bin": {
-    "gcie": "bin/gcie.js"
+    "gcie": "bin/gcie.js",
+    "gcie-init": "bin/gcie-init.js"
   },
   "scripts": {
-    "gcie": "node bin/gcie.js"
+    "gcie": "node bin/gcie.js",
+    "setup": "node bin/gcie-init.js"
   },
   "license": "MIT"
 }

@@ -6,6 +6,10 @@ This file provides persistent architectural context for coding agents working on
 
 Agents must read this file before performing any development tasks.
 
+Agent trigger:
+Use GCIE for context lookup before reading files or making edits.
+Follow `GCIE_USAGE.md` for the adaptive retrieval workflow and mode-routing rules.
+
 ---
 
 PROJECT NAME

@@ -589,19 +589,34 @@ def _subtree_locality_adjustment(path: str | None, explicit_targets: set[str], q
     if not path or not explicit_targets:
         return 0.0
     explicit_roots = {Path(item).parts[0].lower() for item in explicit_targets if Path(item).parts}
+    explicit_parents = {
+        Path(item).parent.as_posix().lower()
+        for item in explicit_targets
+        if Path(item).parent.as_posix() not in {"", "."}
+    }
     explicit_families = {_candidate_family(item) for item in explicit_targets}
+    path_local_focus = any(len(Path(item).parts) >= 3 for item in explicit_targets)
     candidate = Path(path)
     candidate_root = candidate.parts[0].lower() if candidate.parts else ""
     candidate_family = _candidate_family(path)
+    candidate_parent = candidate.parent.as_posix().lower()
 
-    if path in explicit_targets or candidate_family in explicit_families:
-        return 0.12
+    if path in explicit_targets:
+        return 0.18
+    if candidate_parent in explicit_parents and path_local_focus:
+        return 0.22
+    if candidate_family in explicit_families:
+        return 0.14 if path_local_focus else 0.12
     if query_shape in {"cross_layer_ui_api", "backend_config_pair"}:
         if candidate_root in explicit_roots:
-            return 0.03
+            return 0.04
         return -0.08
     if len(explicit_roots) == 1:
-        return -0.14 if candidate_root not in explicit_roots else 0.02
+        if candidate_root not in explicit_roots:
+            return -0.18 if path_local_focus else -0.14
+        return 0.12
+    if path_local_focus and candidate_root in explicit_roots:
+        return 0.02
     return -0.04
 
 
@@ -622,10 +637,37 @@ def _promote_priority_first(
     explicit_priority_ids: set[str],
     linked_priority_ids: set[str],
     chain_priority_ids: set[str],
+    explicit_targets: set[str] | None = None,
 ) -> list[RankedSnippet]:
     explicit_priority_ids = set(explicit_priority_ids)
     linked_priority_ids = set(linked_priority_ids)
     chain_priority_ids = set(chain_priority_ids)
+    explicit_targets = set(explicit_targets or set())
+    explicit_roots = {Path(path).parts[0].lower() for path in explicit_targets if Path(path).parts}
+    explicit_families = {_candidate_family(path) for path in explicit_targets}
+    explicit_parents = {
+        Path(path).parent.as_posix().lower()
+        for path in explicit_targets
+        if Path(path).parent.as_posix() not in {"", "."}
+    }
+
+    def _locality_tier(node_id: str) -> int:
+        path = _node_file_path(node_id)
+        if not path:
+            return 6
+        if path in explicit_targets:
+            return 0
+        candidate = Path(path)
+        candidate_parent = candidate.parent.as_posix().lower()
+        if candidate_parent in explicit_parents:
+            return 1
+        if _candidate_family(path) in explicit_families:
+            return 2
+        candidate_root = candidate.parts[0].lower() if candidate.parts else ""
+        if candidate_root in explicit_roots:
+            return 3
+        return 4
+
     return sorted(
         ranked,
         key=lambda item: (
@@ -633,6 +675,7 @@ def _promote_priority_first(
             0 if item.node_id in linked_priority_ids else 1,
             0 if item.node_id in chain_priority_ids else 1,
             0 if item.node_id.startswith("file:") else 1,
+            _locality_tier(item.node_id),
             -item.score,
             item.node_id,
         ),
@@ -641,12 +684,16 @@ def _promote_priority_first(
 def _family_competition_adjustment(path: str | None, explicit_targets: set[str], query_shape: str) -> float:
     if not path or not explicit_targets:
         return 0.0
+    explicit_roots = {Path(item).parts[0].lower() for item in explicit_targets if Path(item).parts}
+    path_local_focus = any(len(Path(item).parts) >= 3 for item in explicit_targets)
     explicit_families = {_candidate_family(item) for item in explicit_targets}
     family = _candidate_family(path)
     if family in explicit_families:
-        return 0.16
+        return 0.24 if path_local_focus else 0.16
     if query_shape in {"cross_layer_ui_api", "same_layer_pair", "backend_config_pair"}:
         return -0.06
+    if path_local_focus and len(explicit_roots) == 1:
+        return -0.08
     return -0.02
 
 def _entrypoint_penalty(path: str, explicit_targets: set[str]) -> float:
@@ -2070,7 +2117,13 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
     explicit_priority_ids |= _layer_priority_ids(ranked, query, intent, explicit_priority_ids)
     linked_priority_ids = _linked_file_priority_ids(ranked, explicit_priority_ids, query_shape, query, intent)
     chain_priority_ids = _chain_quota_priority_ids(ranked, query, intent, explicit_target_paths)
-    ranked = _promote_priority_first(ranked, explicit_priority_ids, linked_priority_ids, chain_priority_ids)
+    ranked = _promote_priority_first(
+        ranked,
+        explicit_priority_ids,
+        linked_priority_ids,
+        chain_priority_ids,
+        explicit_target_paths,
+    )
 
     mandatory_node_ids = _mandatory_node_ids(
         ranked,
@@ -2110,7 +2163,13 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         combined_priority_ids = support_priority_ids | fallback_priority_ids | linked_priority_ids | chain_priority_ids
         ranked, support_priority_ids = _collapse_support_query_snippets(ranked, query, intent, file_text)
         combined_priority_ids |= support_priority_ids
-        ranked = _promote_priority_first(ranked, explicit_priority_ids, linked_priority_ids, chain_priority_ids)
+        ranked = _promote_priority_first(
+        ranked,
+        explicit_priority_ids,
+        linked_priority_ids,
+        chain_priority_ids,
+        explicit_target_paths,
+    )
         mandatory_node_ids = _mandatory_node_ids(
             ranked,
             query,

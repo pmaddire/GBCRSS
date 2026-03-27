@@ -13,6 +13,7 @@ from .commands.context_slices import run_context_slices
 from .commands.debug import run_debug
 from .commands.index import run_index
 from .commands.query import run_query
+from .commands.setup import run_setup
 
 app = typer.Typer(help="GraphCode Intelligence Engine CLI")
 
@@ -119,6 +120,25 @@ def context_slices_cmd(
     )
     typer.echo(json.dumps(result, indent=2))
 
+
+
+
+@app.command("setup")
+def setup_cmd(
+    path: str = typer.Argument("."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing setup files"),
+    no_agent_usage: bool = typer.Option(False, "--no-agent-usage", help="Do not copy GCIE_USAGE.md"),
+    no_setup_doc: bool = typer.Option(False, "--no-setup-doc", help="Do not copy SETUP_ANY_REPO.md"),
+    no_index: bool = typer.Option(False, "--no-index", help="Skip initial indexing pass"),
+) -> None:
+    result = run_setup(
+        path,
+        force=force,
+        include_agent_usage=not no_agent_usage,
+        include_setup_doc=not no_setup_doc,
+        run_index_pass=not no_index,
+    )
+    typer.echo(json.dumps(result, indent=2))
 
 @app.command("cache-clear")
 def cache_clear_cmd(path: str = typer.Argument(".")) -> None:
