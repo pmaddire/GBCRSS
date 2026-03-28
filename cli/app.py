@@ -8,8 +8,8 @@ import re
 import typer
 
 from .commands.cache import cache_status, clear_cache, warm_cache
-from .commands.context import run_context
-from .commands.context_slices import run_context_slices
+from .commands.context import run_context, run_context_basic
+from .commands.context_slices import adaptive_profile_summary, clear_adaptive_profile, run_context_slices
 from .commands.debug import run_debug
 from .commands.index import run_index
 from .commands.query import run_query
@@ -83,13 +83,19 @@ def context_cmd(
     query: str,
     budget: str = typer.Option("auto", "--budget"),
     intent: str | None = typer.Option(None, "--intent"),
+    mode: str = typer.Option("basic", "--mode", help="context mode: basic or adaptive"),
 ) -> None:
     if budget == "auto":
         budget_val = _auto_context_budget(query, intent)
     else:
         budget_val = int(budget)
 
-    result = run_context(path, query, budget=budget_val, intent=intent)
+    if mode == "basic":
+        result = run_context_basic(path, query, budget=budget_val, intent=intent)
+    elif mode == "adaptive":
+        result = run_context(path, query, budget=budget_val, intent=intent)
+    else:
+        raise typer.BadParameter("--mode must be 'basic' or 'adaptive'")
     typer.echo(json.dumps(result, indent=2))
 
 
@@ -123,6 +129,14 @@ def context_slices_cmd(
 
 
 
+
+@app.command("adaptive-profile")
+def adaptive_profile_cmd(
+    repo: str = typer.Argument("."),
+    clear: bool = typer.Option(False, "--clear", help="Clear learned adaptive profile"),
+) -> None:
+    result = clear_adaptive_profile(repo) if clear else adaptive_profile_summary(repo)
+    typer.echo(json.dumps(result, indent=2))
 @app.command("setup")
 def setup_cmd(
     path: str = typer.Argument("."),
@@ -160,4 +174,5 @@ def cache_warm_cmd(path: str = typer.Argument(".")) -> None:
 
 if __name__ == "__main__":
     app()
+
 

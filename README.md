@@ -238,7 +238,7 @@ Important note:
 - `gcie index <path>`
 - `gcie query <file.py> "<question>"`
 - `gcie debug <file.py> "<question>"`
-- `gcie context <repo|file> "<task>" --budget auto --intent <edit|debug|refactor|explore>`
+- `gcie context <repo|file> "<task>" --budget auto --intent <edit|debug|refactor|explore> --mode basic`
 - `gcie context-slices <repo> "<task>" --intent <edit|debug|refactor|explore> [--profile recall|low] [--stage-a 400] [--stage-b 800] [--max-total 1200] [--pin frontend/src/App.jsx] [--pin-budget 300] [--include-tests]`
 
 ## How To Use It

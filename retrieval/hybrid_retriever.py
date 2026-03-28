@@ -126,7 +126,14 @@ def _semantic_node_scores(
         return {}, ()
 
     retriever = SemanticRetriever([text for _, text in entries])
-    semantic_top_k = min(max(top_k * 4, 24), len(entries))
+    # Keep semantic fan-out intentionally bounded to reduce noisy candidates.
+    if len(query_terms) >= 10:
+        fanout = 3.0
+    elif len(query_terms) >= 6:
+        fanout = 2.5
+    else:
+        fanout = 2.0
+    semantic_top_k = min(max(int(round(top_k * fanout)), max(12, top_k + 4)), len(entries))
     hits = retriever.retrieve(query, top_k=semantic_top_k)
 
     aggregates: dict[str, _SemanticAggregate] = {}
@@ -247,3 +254,4 @@ def hybrid_retrieve(
         out.append(HybridCandidate(node_id=item.node_id, score=item.score, rationale=rationale))
 
     return tuple(out)
+

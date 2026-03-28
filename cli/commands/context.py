@@ -1,4 +1,4 @@
-﻿"""CLI command: context."""
+"""CLI command: context."""
 
 from __future__ import annotations
 
@@ -1722,6 +1722,69 @@ def _vector_channel_candidates(
     return out
 
 
+
+def _channel_quota_plan(
+    query: str,
+    intent: str | None,
+    *,
+    explicit_targets: set[str],
+    query_shape: str,
+) -> dict[str, int]:
+    resolved_intent = _effective_intent(query, intent)
+    explicit_count = len(explicit_targets)
+
+    quotas: dict[str, int] = {
+        "target": 8,
+        "lex": 16,
+        "vec": 16,
+        "expand": 10,
+        "adj": 8,
+        "fallback": 6,
+    }
+
+    if resolved_intent in {"debug", "edit", "refactor"}:
+        quotas["expand"] = 8
+        quotas["fallback"] = 4
+
+    if explicit_count >= 2:
+        quotas["vec"] = min(quotas["vec"], 12)
+        quotas["expand"] = min(quotas["expand"], 7)
+
+    if query_shape in {"cross_layer_ui_api", "builder_orchestrator", "multi_hop_chain", "backend_config_pair"}:
+        quotas["target"] = 10
+        quotas["lex"] = min(quotas["lex"], 14)
+        quotas["vec"] = min(quotas["vec"], 14)
+        quotas["adj"] = min(quotas["adj"], 7)
+
+    if query_shape == "single_file" and explicit_count:
+        quotas["target"] = 6
+        quotas["lex"] = min(quotas["lex"], 10)
+        quotas["vec"] = min(quotas["vec"], 10)
+        quotas["adj"] = min(quotas["adj"], 5)
+
+    return quotas
+
+
+def _apply_channel_quotas(
+    channel_map: dict[str, list[_ChannelCandidate]],
+    query: str,
+    intent: str | None,
+    *,
+    explicit_targets: set[str],
+    query_shape: str,
+) -> dict[str, list[_ChannelCandidate]]:
+    quotas = _channel_quota_plan(
+        query,
+        intent,
+        explicit_targets=explicit_targets,
+        query_shape=query_shape,
+    )
+    trimmed: dict[str, list[_ChannelCandidate]] = {}
+    for channel_name, candidates in channel_map.items():
+        ordered = sorted(candidates, key=lambda item: (-item.score, item.node_id))
+        cap = quotas.get(channel_name, len(ordered))
+        trimmed[channel_name] = ordered[:max(cap, 0)]
+    return trimmed
 def _fuse_context_channels(
     channel_map: dict[str, list[_ChannelCandidate]],
     query: str,
@@ -2051,6 +2114,77 @@ def _apply_packaging(
         packed.append(item)
     return packed
 
+def run_context_basic(path: str, query: str, budget: int | None, intent: str | None, top_k: int = 20) -> dict:
+    """Lean plain-context mode prioritizing token efficiency."""
+    target = Path(path)
+
+    if target.is_dir():
+        _, file_text, function_snippets, class_snippets, _, graph = _collect_repo_modules(target)
+    else:
+        module = parse_python_file(target)
+        source = target.read_text(encoding="utf-8").splitlines()
+        graph = nx.compose(
+            nx.compose(build_call_graph((module,)), build_variable_graph((module,))),
+            build_code_structure_graph((module,)),
+        )
+        file_rel = target.as_posix()
+        file_text = {file_rel: "\n".join(source)}
+        function_snippets = {}
+        class_snippets = {}
+        lines = source
+        for fn in module.functions:
+            start = max(fn.start_line, 1)
+            end = max(fn.end_line, start)
+            snippet = "\n".join(lines[start - 1 : end]).strip()
+            node_id = f"function:{Path(fn.file).as_posix()}::{fn.name}"
+            if snippet:
+                function_snippets[node_id] = snippet
+        for cls in module.classes:
+            start = max(cls.start_line, 1)
+            end = max(cls.end_line, start)
+            snippet = "\n".join(lines[start - 1 : end]).strip()
+            node_id = f"class:{Path(cls.file).as_posix()}::{cls.name}"
+            if snippet:
+                class_snippets[node_id] = snippet
+
+    ranked: list[RankedSnippet] = []
+    for candidate in hybrid_retrieve(graph, query, top_k=top_k):
+        ranked.append(
+            RankedSnippet(
+                node_id=candidate.node_id,
+                content=_candidate_content(candidate.node_id, file_text, function_snippets, class_snippets),
+                score=candidate.score,
+            )
+        )
+
+    payload = build_context(
+        query,
+        ranked,
+        token_budget=budget,
+        intent=intent,
+        mandatory_node_ids=None,
+    )
+
+    return {
+        "query": payload.query,
+        "tokens": payload.total_tokens_estimate,
+        "snippets": [
+            {
+                "node_id": snippet.node_id,
+                "score": snippet.score,
+                "content": snippet.content,
+                "attached_context": {
+                    "mode": "basic",
+                    "why_included": "hybrid_topk",
+                },
+            }
+            for snippet in payload.snippets
+        ],
+        "fallback_search_used": False,
+        "fallback_reason": None,
+    }
+
+
 def run_context(path: str, query: str, budget: int | None, intent: str | None, top_k: int = 40) -> dict:
     target = Path(path)
 
@@ -2093,8 +2227,15 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         "lex": _file_channel_candidates(file_text, query, intent, channel="lex", limit=18),
         "expand": _file_channel_candidates(file_text, query, intent, channel="expand", limit=14),
     }
-    ranked, attached = _fuse_context_channels(
+    quota_channels = _apply_channel_quotas(
         channels,
+        query,
+        intent,
+        explicit_targets=explicit_target_paths,
+        query_shape=query_shape,
+    )
+    ranked, attached = _fuse_context_channels(
+        quota_channels,
         query,
         intent,
         file_text,
@@ -2103,8 +2244,15 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
     )
     anchor_paths = _top_anchor_paths(ranked)
     channels["adj"] = _file_channel_candidates(file_text, query, intent, channel="adj", anchor_paths=anchor_paths, limit=10)
-    ranked, attached = _fuse_context_channels(
+    quota_channels = _apply_channel_quotas(
         channels,
+        query,
+        intent,
+        explicit_targets=explicit_target_paths,
+        query_shape=query_shape,
+    )
+    ranked, attached = _fuse_context_channels(
+        quota_channels,
         query,
         intent,
         file_text,
@@ -2389,6 +2537,10 @@ def run_context_adaptive(
     payload["adaptive_completion_reason"] = "missing_referenced_companion" if added else None
     payload["adaptive_missing_files"] = added
     return payload
+
+
+
+
 
 
 
