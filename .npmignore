@@ -1,0 +1,24 @@
+﻿# Runtime/state artifacts
+.gcie/
+.planning/
+.npm-cache/
+
+# Local environments
+.venv/
+__pycache__/
+*.pyc
+
+# Dev/test/doc-only
+tests/
+docs/
+performance/
+get-shit-done/
+
+# Local backups/temp
+*.bak
+*.tmp
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db

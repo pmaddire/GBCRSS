@@ -7,6 +7,7 @@ import re
 
 import typer
 
+from .commands.adaptation import run_post_init_adaptation
 from .commands.cache import cache_status, clear_cache, warm_cache
 from .commands.context import run_context, run_context_basic
 from .commands.context_slices import adaptive_profile_summary, clear_adaptive_profile, run_context_slices
@@ -127,9 +128,6 @@ def context_slices_cmd(
     typer.echo(json.dumps(result, indent=2))
 
 
-
-
-
 @app.command("adaptive-profile")
 def adaptive_profile_cmd(
     repo: str = typer.Argument("."),
@@ -137,6 +135,24 @@ def adaptive_profile_cmd(
 ) -> None:
     result = clear_adaptive_profile(repo) if clear else adaptive_profile_summary(repo)
     typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("adapt")
+def adapt_cmd(
+    repo: str = typer.Argument("."),
+    benchmark_size: int = typer.Option(10, "--benchmark-size"),
+    efficiency_iterations: int = typer.Option(5, "--efficiency-iterations"),
+    clear_profile: bool = typer.Option(False, "--clear-profile"),
+) -> None:
+    result = run_post_init_adaptation(
+        repo,
+        benchmark_size=benchmark_size,
+        efficiency_iterations=efficiency_iterations,
+        clear_profile=clear_profile,
+    )
+    typer.echo(json.dumps(result, indent=2))
+
+
 @app.command("setup")
 def setup_cmd(
     path: str = typer.Argument("."),
@@ -144,6 +160,9 @@ def setup_cmd(
     no_agent_usage: bool = typer.Option(False, "--no-agent-usage", help="Do not copy GCIE_USAGE.md"),
     no_setup_doc: bool = typer.Option(False, "--no-setup-doc", help="Do not copy SETUP_ANY_REPO.md"),
     no_index: bool = typer.Option(False, "--no-index", help="Skip initial indexing pass"),
+    adapt: bool = typer.Option(False, "--adapt", help="Run post-init adaptation pipeline after setup"),
+    adaptation_benchmark_size: int = typer.Option(10, "--adapt-benchmark-size"),
+    adaptation_efficiency_iterations: int = typer.Option(5, "--adapt-efficiency-iterations"),
 ) -> None:
     result = run_setup(
         path,
@@ -151,8 +170,12 @@ def setup_cmd(
         include_agent_usage=not no_agent_usage,
         include_setup_doc=not no_setup_doc,
         run_index_pass=not no_index,
+        run_adaptation_pass=adapt,
+        adaptation_benchmark_size=adaptation_benchmark_size,
+        adaptation_efficiency_iterations=adaptation_efficiency_iterations,
     )
     typer.echo(json.dumps(result, indent=2))
+
 
 @app.command("cache-clear")
 def cache_clear_cmd(path: str = typer.Argument(".")) -> None:
@@ -174,5 +197,3 @@ def cache_warm_cmd(path: str = typer.Argument(".")) -> None:
 
 if __name__ == "__main__":
     app()
-
-

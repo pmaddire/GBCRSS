@@ -51,6 +51,7 @@ _ARCH_KEYWORDS = {
 }
 
 
+
 @dataclass
 class ArchitectureSliceResult:
     query: str
@@ -100,7 +101,7 @@ def _snippet_from_lines(lines: list[str], max_lines: int) -> str:
 def _collect_snippets(repo_path: Path, files: list[str], max_lines: int = 120) -> tuple[list[dict], list[str]]:
     snippets: list[dict] = []
     missing: list[str] = []
-    for rel_path in files:
+    for idx, rel_path in enumerate(files):
         file_path = repo_path / rel_path
         if not file_path.exists():
             missing.append(rel_path)

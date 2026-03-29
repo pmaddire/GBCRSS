@@ -1,6 +1,6 @@
 {
   "name": "@pmaddire/gcie",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "GraphCode Intelligence Engine one-command setup and context CLI",
   "bin": {
     "gcie": "bin/gcie.js",

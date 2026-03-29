@@ -60,6 +60,7 @@ _EXCLUDE_GLOBS = (
     "get-shit-done/docs/zh-CN/**",
 )
 
+
 _FRONTEND_KEYWORDS = {
     "frontend",
     "ui",
@@ -952,6 +953,61 @@ def _mandatory_node_ids(
 
 
 
+
+def _trim_mandatory_node_ids_for_dense_queries(
+    mandatory_node_ids: set[str],
+    ranked: list[RankedSnippet],
+    query: str,
+    intent: str | None,
+    *,
+    explicit_priority_ids: set[str],
+) -> set[str]:
+    if not mandatory_node_ids:
+        return mandatory_node_ids
+    if _effective_intent(query, intent) not in {"explore", "debug"}:
+        return mandatory_node_ids
+
+    lowered = query.lower()
+    is_dense_graph_or_retrieval = any(
+        token in lowered
+        for token in (
+            "graphs/",
+            "graph builders",
+            "execution_graph",
+            "call_graph",
+            "variable_graph",
+            "retrieval/",
+            "hybrid_retriever",
+            "symbolic_retriever",
+            "semantic_retriever",
+        )
+    )
+
+    explicit_priority_ids = set(explicit_priority_ids)
+    non_file_keep = {node_id for node_id in mandatory_node_ids if not node_id.startswith("file:")}
+    explicit_file_keep = {
+        node_id for node_id in explicit_priority_ids if node_id.startswith("file:") and node_id in mandatory_node_ids
+    }
+
+    if is_dense_graph_or_retrieval:
+        max_file_mandatory = max(len(explicit_file_keep) + 1, 3)
+    elif len(explicit_file_keep) >= 2:
+        max_file_mandatory = len(explicit_file_keep) + 1
+    else:
+        return mandatory_node_ids
+
+    file_keep = set(explicit_file_keep)
+    for item in ranked:
+        if len(file_keep) >= max_file_mandatory:
+            break
+        if not item.node_id.startswith("file:"):
+            continue
+        if item.node_id not in mandatory_node_ids or item.node_id in file_keep:
+            continue
+        file_keep.add(item.node_id)
+
+    return non_file_keep | file_keep | explicit_priority_ids
+
 def _linked_file_priority_ids(
     ranked: list[RankedSnippet],
     explicit_priority_ids: set[str],
@@ -1162,6 +1218,7 @@ def _supplemental_file_snippets(
 ) -> list[RankedSnippet]:
     supplemental: list[RankedSnippet] = []
     effective_intent = _effective_intent(query, intent)
+    snippet_limit = _support_snippet_line_limit(query, intent)
     system_query = _is_system_query(query)
     for path, text in file_text.items():
         path_score = _path_match_score(path, query)
@@ -1178,7 +1235,7 @@ def _supplemental_file_snippets(
         supplemental.append(
             RankedSnippet(
                 node_id=f"file:{path}",
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=snippet_limit),
                 score=total,
             )
         )
@@ -1220,7 +1277,13 @@ def _top_anchor_paths(ranked: list[RankedSnippet], *, limit: int = 6) -> list[st
     return anchors
 
 
-def _seed_anchor_paths(file_text: dict[str, str], query: str, intent: str | None, *, limit: int = 4) -> list[str]:
+def _seed_anchor_paths(
+    file_text: dict[str, str],
+    query: str,
+    intent: str | None,
+    *,
+    limit: int = 4,
+) -> list[str]:
     seeded: list[tuple[float, str]] = []
     for path, text in file_text.items():
         if _classify_path(path) != "code":
@@ -1300,6 +1363,7 @@ def _promoted_support_file_snippets(
         return []
 
     promoted: list[RankedSnippet] = []
+    snippet_limit = _support_snippet_line_limit(query, intent)
     for path, text in file_text.items():
         node_id = f"file:{path}"
         if node_id in existing_ids:
@@ -1313,7 +1377,7 @@ def _promoted_support_file_snippets(
         promoted.append(
             RankedSnippet(
                 node_id=node_id,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=snippet_limit),
                 score=total,
             )
         )
@@ -1399,6 +1463,7 @@ def _repair_file_snippets(
         return []
 
     repair: list[RankedSnippet] = []
+    snippet_limit = _support_snippet_line_limit(query, intent)
     promoted_ids: set[str] = set()
     for item in _promoted_support_file_snippets(file_text, query, intent, anchor_paths, existing_ids, limit=min(2, limit)):
         repair.append(item)
@@ -1419,7 +1484,7 @@ def _repair_file_snippets(
         repair.append(
             RankedSnippet(
                 node_id=node_id,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=snippet_limit),
                 score=total,
             )
         )
@@ -1466,6 +1531,7 @@ def _reference_fallback_snippets(
         return []
 
     recovered: list[RankedSnippet] = []
+    snippet_limit = _support_snippet_line_limit(query, intent)
     for path, text in file_text.items():
         node_id = f"file:{path}"
         if node_id in existing_ids:
@@ -1503,7 +1569,7 @@ def _reference_fallback_snippets(
         recovered.append(
             RankedSnippet(
                 node_id=node_id,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=snippet_limit),
                 score=total,
             )
         )
@@ -1631,6 +1697,7 @@ def _file_channel_candidates(
 
     variant = _query_variant(query, channel)
     out: list[_ChannelCandidate] = []
+    snippet_limit = _support_snippet_line_limit(query, intent)
     for path, text in file_text.items():
         file_class = _classify_path(path)
         if channel == "adj" and file_class != "code":
@@ -1663,7 +1730,7 @@ def _file_channel_candidates(
                 node_id=f"file:{path}",
                 channel=channel,
                 score=total,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=(snippet_limit + 8) if channel == "adj" else snippet_limit),
                 rationale=f"path={path_score:.2f},content={content_score:.2f},adj={adjacency:.2f},support={support_bonus:.2f}",
             )
         )
@@ -1979,6 +2046,7 @@ def _normal_search_fallback_snippets(
     referenced = set(_referenced_companion_paths(anchors, file_text, set(selected_paths)))
 
     out: list[_ChannelCandidate] = []
+    snippet_limit = _support_snippet_line_limit(query, intent)
     for path, text in file_text.items():
         node_id = f"file:{path}"
         if node_id in existing_ids:
@@ -2001,7 +2069,7 @@ def _normal_search_fallback_snippets(
                 node_id=node_id,
                 channel="fallback",
                 score=total,
-                content=_snippet_from_lines(text.splitlines(), max_lines=120),
+                content=_snippet_from_lines(text.splitlines(), max_lines=snippet_limit),
                 rationale=f"fallback:path={path_score:.2f},content={content_score:.2f},referenced={path in referenced}",
             )
         )
@@ -2071,7 +2139,7 @@ def _packaging_sets(
     linked_priority_ids: set[str],
     chain_priority_ids: set[str],
     mandatory_node_ids: set[str],
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     pivot_ids = set(explicit_priority_ids) | set(linked_priority_ids) | set(chain_priority_ids)
     if not pivot_ids:
         for item in ranked:
@@ -2081,6 +2149,7 @@ def _packaging_sets(
                 break
 
     skeleton_ids: set[str] = set()
+    compact_ids: set[str] = set()
     for item in ranked:
         if not item.node_id.startswith("file:"):
             continue
@@ -2090,30 +2159,316 @@ def _packaging_sets(
         role = meta.get("candidate_role") if isinstance(meta, dict) else None
         if role in {"support_config", "sibling_module", "caller_or_entry", "generic_entrypoint"}:
             skeleton_ids.add(item.node_id)
-    return pivot_ids, skeleton_ids
+        else:
+            compact_ids.add(item.node_id)
+    return pivot_ids, skeleton_ids, compact_ids
+
+
+def _order_for_packing(
+    ranked: list[RankedSnippet],
+    *,
+    mandatory_node_ids: set[str],
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+) -> list[RankedSnippet]:
+    mandatory_node_ids = set(mandatory_node_ids)
+    explicit_priority_ids = set(explicit_priority_ids)
+    linked_priority_ids = set(linked_priority_ids)
+    chain_priority_ids = set(chain_priority_ids)
+
+    return sorted(
+        ranked,
+        key=lambda item: (
+            0 if item.node_id in mandatory_node_ids else 1,
+            0 if item.node_id in explicit_priority_ids else 1,
+            0 if item.node_id in linked_priority_ids else 1,
+            0 if item.node_id in chain_priority_ids else 1,
+            0 if item.node_id.startswith("file:") else 1,
+            -item.score,
+            item.node_id,
+        ),
+    )
+
+def _query_shape_candidate_cap(query_shape: str) -> int:
+    return {
+        "single_file": 10,
+        "same_layer_pair": 12,
+        "backend_config_pair": 14,
+        "cross_layer_ui_api": 14,
+        "builder_orchestrator": 15,
+        "multi_hop_chain": 16,
+    }.get(query_shape, 12)
+
+
+def _query_shape_non_musthave_cap(query_shape: str, query: str, intent: str | None) -> int:
+    cap = {
+        "single_file": 2,
+        "same_layer_pair": 3,
+        "backend_config_pair": 3,
+        "cross_layer_ui_api": 4,
+        "builder_orchestrator": 4,
+        "multi_hop_chain": 5,
+    }.get(query_shape, 3)
+
+    lowered = query.lower()
+    if any(token in lowered for token in ("graphs/", "execution_graph", "call_graph", "variable_graph", "graph builders")):
+        cap = min(cap, 2)
+    if any(token in lowered for token in ("retrieval/", "hybrid_retriever", "symbolic_retriever", "semantic_retriever")):
+        cap = min(cap, 2)
+    if _effective_intent(query, intent) in {"explore", "debug"}:
+        cap = max(1, cap - 1)
+    return max(1, cap)
+
+
+def _packaging_line_limits(query: str, intent: str | None, query_shape: str) -> tuple[int, int]:
+    skeleton_lines = 20
+    compact_lines = 30
+
+    lowered = query.lower()
+    if _effective_intent(query, intent) in {"explore", "debug"}:
+        skeleton_lines = 12
+        compact_lines = 20
+    if query_shape in {"builder_orchestrator", "multi_hop_chain"}:
+        compact_lines = min(compact_lines, 20)
+    if any(token in lowered for token in ("graphs/", "retrieval/", "execution_graph", "hybrid_retriever")):
+        skeleton_lines = min(skeleton_lines, 10)
+        compact_lines = min(compact_lines, 16)
+
+    return max(8, skeleton_lines), max(14, compact_lines)
+
+
+def _support_snippet_line_limit(query: str, intent: str | None) -> int:
+    return 24
+
+
+def _candidate_similarity(node_a: str, node_b: str, attached: dict[str, dict[str, object]]) -> float:
+    if node_a == node_b:
+        return 1.0
+    path_a = _node_file_path(node_a)
+    path_b = _node_file_path(node_b)
+    if not path_a or not path_b:
+        return 0.0
+    if path_a == path_b:
+        return 1.0
+    fam_a = _candidate_family(path_a)
+    fam_b = _candidate_family(path_b)
+    if fam_a == fam_b:
+        return 0.75
+    root_a = Path(path_a).parts[0].lower() if Path(path_a).parts else ""
+    root_b = Path(path_b).parts[0].lower() if Path(path_b).parts else ""
+    if root_a and root_a == root_b:
+        return 0.45
+    meta_a = attached.get(node_a, {}) if isinstance(attached.get(node_a, {}), dict) else {}
+    meta_b = attached.get(node_b, {}) if isinstance(attached.get(node_b, {}), dict) else {}
+    role_a = str(meta_a.get("candidate_role", ""))
+    role_b = str(meta_b.get("candidate_role", ""))
+    if role_a and role_a == role_b and role_a in {"support_config", "generic_entrypoint", "caller_or_entry"}:
+        return 0.4
+    return 0.1
+
+
+def _mmr_diversify_ranked(
+    ranked: list[RankedSnippet],
+    attached: dict[str, dict[str, object]],
+    *,
+    query_shape: str,
+    mandatory_node_ids: set[str],
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+) -> list[RankedSnippet]:
+    if not ranked:
+        return []
+
+    cap = _query_shape_candidate_cap(query_shape)
+    priority_ids = set(mandatory_node_ids) | set(explicit_priority_ids) | set(linked_priority_ids) | set(chain_priority_ids)
+
+    by_id = {item.node_id: item for item in ranked}
+    selected: list[RankedSnippet] = []
+    selected_ids: set[str] = set()
+
+    for item in ranked:
+        if item.node_id in priority_ids and item.node_id not in selected_ids:
+            selected.append(item)
+            selected_ids.add(item.node_id)
+
+    pool = [item for item in ranked if item.node_id not in selected_ids]
+    diversity_lambda = 0.35
+    while pool and len(selected) < cap:
+        best_item: RankedSnippet | None = None
+        best_score = -1e9
+        for item in pool:
+            max_sim = 0.0
+            for chosen in selected:
+                max_sim = max(max_sim, _candidate_similarity(item.node_id, chosen.node_id, attached))
+            mmr_score = item.score - (diversity_lambda * max_sim)
+            if mmr_score > best_score or (abs(mmr_score - best_score) < 1e-9 and item.node_id < (best_item.node_id if best_item else "~")):
+                best_item = item
+                best_score = mmr_score
+        if best_item is None:
+            break
+        selected.append(best_item)
+        selected_ids.add(best_item.node_id)
+        pool = [item for item in pool if item.node_id != best_item.node_id]
+
+    selected.sort(key=lambda item: (-item.score, item.node_id))
+    return selected
+
+
+def _prune_non_musthave_candidates(
+    ranked: list[RankedSnippet],
+    attached: dict[str, dict[str, object]],
+    *,
+    query: str,
+    intent: str | None,
+    query_shape: str,
+    mandatory_node_ids: set[str],
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+) -> list[RankedSnippet]:
+    keep_ids = set(mandatory_node_ids) | set(explicit_priority_ids) | set(linked_priority_ids) | set(chain_priority_ids)
+    cap = _query_shape_non_musthave_cap(query_shape, query, intent)
+
+    kept: list[RankedSnippet] = []
+    non_must_have: list[RankedSnippet] = []
+    for item in ranked:
+        if item.node_id in keep_ids:
+            kept.append(item)
+        else:
+            non_must_have.append(item)
+
+    non_must_have.sort(
+        key=lambda item: (
+            0 if item.node_id.startswith("file:") else 1,
+            0 if _classify_path(_node_file_path(item.node_id) or "") == "code" else 1,
+            -item.score,
+            item.node_id,
+        )
+    )
+    kept.extend(non_must_have[:cap])
+    kept.sort(key=lambda item: (-item.score, item.node_id))
+    return kept
+
+
+def _query_shape_total_file_cap(query_shape: str, query: str, intent: str | None) -> int:
+    cap = {
+        "single_file": 5,
+        "same_layer_pair": 6,
+        "backend_config_pair": 6,
+        "cross_layer_ui_api": 7,
+        "builder_orchestrator": 7,
+        "multi_hop_chain": 8,
+    }.get(query_shape, 6)
+
+    lowered = query.lower()
+    if any(token in lowered for token in ("graphs/", "execution_graph", "call_graph", "variable_graph", "graph builders")):
+        cap = min(cap, 5)
+    if any(token in lowered for token in ("retrieval/", "hybrid_retriever", "symbolic_retriever", "semantic_retriever")):
+        cap = min(cap, 5)
+    if _effective_intent(query, intent) in {"explore", "debug"}:
+        cap = max(4, cap - 1)
+    return max(3, cap)
+
+
+def _enforce_family_file_cap(
+    ranked: list[RankedSnippet],
+    *,
+    query: str,
+    intent: str | None,
+    query_shape: str,
+    mandatory_node_ids: set[str],
+    explicit_priority_ids: set[str],
+    linked_priority_ids: set[str],
+    chain_priority_ids: set[str],
+) -> list[RankedSnippet]:
+    keep_ids = set(mandatory_node_ids) | set(explicit_priority_ids) | set(linked_priority_ids) | set(chain_priority_ids)
+    file_cap = _query_shape_total_file_cap(query_shape, query, intent)
+
+    out: list[RankedSnippet] = []
+    file_count = 0
+    for item in ranked:
+        is_file = item.node_id.startswith("file:")
+        if is_file and item.node_id in keep_ids:
+            out.append(item)
+            file_count += 1
+            continue
+        if not is_file:
+            out.append(item)
+            continue
+        if file_count >= file_cap:
+            continue
+        out.append(item)
+        file_count += 1
+
+    out.sort(key=lambda item: (-item.score, item.node_id))
+    return out
 
 
 def _apply_packaging(
     ranked: list[RankedSnippet],
     pivot_ids: set[str],
     skeleton_ids: set[str],
+    compact_ids: set[str],
     *,
-    max_skeleton_lines: int = 60,
+    query: str,
+    intent: str | None,
+    query_shape: str,
+    mandatory_node_ids: set[str] | None = None,
 ) -> list[RankedSnippet]:
+    max_skeleton_lines, max_compact_lines = _packaging_line_limits(query, intent, query_shape)
+    mandatory_node_ids = set(mandatory_node_ids or set())
     packed: list[RankedSnippet] = []
-    for item in ranked:
-        if item.node_id in skeleton_ids:
-            packed.append(
-                RankedSnippet(
-                    node_id=item.node_id,
-                    score=item.score,
-                    content=_skeletonize_content(item.content, max_lines=max_skeleton_lines),
-                )
-            )
-            continue
-        packed.append(item)
-    return packed
+    seen_symbols: set[str] = set()
 
+    def _extract_signature_symbols(text: str) -> set[str]:
+        symbols: set[str] = set()
+        pattern = re.compile(
+            r"^\s*(?:def|class|function|async\s+function|export\s+(?:function|class|const|let|var)|const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            re.IGNORECASE,
+        )
+        for line in text.splitlines():
+            match = pattern.match(line)
+            if match:
+                symbols.add(match.group(1).lower())
+            if len(symbols) >= 16:
+                break
+        return symbols
+
+    for item in ranked:
+        content = item.content
+        if item.node_id in skeleton_ids:
+            content = _skeletonize_content(item.content, max_lines=max_skeleton_lines)
+        elif item.node_id in compact_ids and item.node_id not in pivot_ids:
+            content = _skeletonize_content(item.content, max_lines=max_compact_lines)
+
+        # If a lower-priority packed file mostly repeats symbols already seen,
+        # compress it to a tiny marker to reduce token overhead.
+        if (
+            item.node_id not in pivot_ids
+            and item.node_id not in mandatory_node_ids
+            and item.node_id.startswith("file:")
+            and (item.node_id in skeleton_ids or item.node_id in compact_ids)
+        ):
+            symbols = _extract_signature_symbols(content)
+            overlap = symbols & seen_symbols
+            if symbols and (symbols.issubset(seen_symbols) or (len(symbols) >= 3 and len(overlap) / len(symbols) >= 0.8)):
+                preview = ",".join(sorted(overlap or symbols)[:4])
+                content = f"# covered: {preview}"
+            else:
+                seen_symbols.update(symbols)
+        else:
+            seen_symbols.update(_extract_signature_symbols(content))
+
+        packed.append(
+            RankedSnippet(
+                node_id=item.node_id,
+                score=item.score,
+                content=content,
+            )
+        )
+    return packed
 def run_context_basic(path: str, query: str, budget: int | None, intent: str | None, top_k: int = 20) -> dict:
     """Lean plain-context mode prioritizing token efficiency."""
     target = Path(path)
@@ -2280,8 +2635,52 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         support_priority_ids=support_priority_ids | linked_priority_ids | chain_priority_ids,
         explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
     )
+    mandatory_node_ids = _trim_mandatory_node_ids_for_dense_queries(
+        mandatory_node_ids,
+        ranked,
+        query,
+        intent,
+        explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
+    )
 
-    pivot_node_ids, skeleton_node_ids = _packaging_sets(
+    ranked = _mmr_diversify_ranked(
+        ranked,
+        attached,
+        query_shape=query_shape,
+        mandatory_node_ids=mandatory_node_ids,
+        explicit_priority_ids=explicit_priority_ids,
+        linked_priority_ids=linked_priority_ids,
+        chain_priority_ids=chain_priority_ids,
+    )
+    ranked = _prune_non_musthave_candidates(
+        ranked,
+        attached,
+        query=query,
+        intent=intent,
+        query_shape=query_shape,
+        mandatory_node_ids=mandatory_node_ids,
+        explicit_priority_ids=explicit_priority_ids,
+        linked_priority_ids=linked_priority_ids,
+        chain_priority_ids=chain_priority_ids,
+    )
+    ranked = _enforce_family_file_cap(
+        ranked,
+        query=query,
+        intent=intent,
+        query_shape=query_shape,
+        mandatory_node_ids=mandatory_node_ids,
+        explicit_priority_ids=explicit_priority_ids,
+        linked_priority_ids=linked_priority_ids,
+        chain_priority_ids=chain_priority_ids,
+    )
+    ranked = _order_for_packing(
+        ranked,
+        mandatory_node_ids=mandatory_node_ids,
+        explicit_priority_ids=explicit_priority_ids,
+        linked_priority_ids=linked_priority_ids,
+        chain_priority_ids=chain_priority_ids,
+    )
+    pivot_node_ids, skeleton_node_ids, compact_node_ids = _packaging_sets(
         ranked,
         attached,
         explicit_priority_ids=explicit_priority_ids,
@@ -2289,7 +2688,16 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         chain_priority_ids=chain_priority_ids,
         mandatory_node_ids=mandatory_node_ids,
     )
-    packed_ranked = _apply_packaging(ranked, pivot_node_ids, skeleton_node_ids)
+    packed_ranked = _apply_packaging(
+        ranked,
+        pivot_node_ids,
+        skeleton_node_ids,
+        compact_node_ids,
+        query=query,
+        intent=intent,
+        query_shape=query_shape,
+        mandatory_node_ids=mandatory_node_ids,
+    )
 
     payload = build_context(
         query,
@@ -2312,12 +2720,12 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
         ranked, support_priority_ids = _collapse_support_query_snippets(ranked, query, intent, file_text)
         combined_priority_ids |= support_priority_ids
         ranked = _promote_priority_first(
-        ranked,
-        explicit_priority_ids,
-        linked_priority_ids,
-        chain_priority_ids,
-        explicit_target_paths,
-    )
+            ranked,
+            explicit_priority_ids,
+            linked_priority_ids,
+            chain_priority_ids,
+            explicit_target_paths,
+        )
         mandatory_node_ids = _mandatory_node_ids(
             ranked,
             query,
@@ -2325,7 +2733,51 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
             support_priority_ids=combined_priority_ids,
             explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
         )
-        pivot_node_ids, skeleton_node_ids = _packaging_sets(
+        mandatory_node_ids = _trim_mandatory_node_ids_for_dense_queries(
+            mandatory_node_ids,
+            ranked,
+            query,
+            intent,
+            explicit_priority_ids=explicit_priority_ids | linked_priority_ids | chain_priority_ids,
+        )
+        ranked = _mmr_diversify_ranked(
+            ranked,
+            attached,
+            query_shape=query_shape,
+            mandatory_node_ids=mandatory_node_ids,
+            explicit_priority_ids=explicit_priority_ids,
+            linked_priority_ids=linked_priority_ids,
+            chain_priority_ids=chain_priority_ids,
+        )
+        ranked = _prune_non_musthave_candidates(
+            ranked,
+            attached,
+            query=query,
+            intent=intent,
+            query_shape=query_shape,
+            mandatory_node_ids=mandatory_node_ids,
+            explicit_priority_ids=explicit_priority_ids,
+            linked_priority_ids=linked_priority_ids,
+            chain_priority_ids=chain_priority_ids,
+        )
+        ranked = _enforce_family_file_cap(
+            ranked,
+            query=query,
+            intent=intent,
+            query_shape=query_shape,
+            mandatory_node_ids=mandatory_node_ids,
+            explicit_priority_ids=explicit_priority_ids,
+            linked_priority_ids=linked_priority_ids,
+            chain_priority_ids=chain_priority_ids,
+        )
+        ranked = _order_for_packing(
+            ranked,
+            mandatory_node_ids=mandatory_node_ids,
+            explicit_priority_ids=explicit_priority_ids,
+            linked_priority_ids=linked_priority_ids,
+            chain_priority_ids=chain_priority_ids,
+        )
+        pivot_node_ids, skeleton_node_ids, compact_node_ids = _packaging_sets(
             ranked,
             attached,
             explicit_priority_ids=explicit_priority_ids,
@@ -2333,7 +2785,16 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
             chain_priority_ids=chain_priority_ids,
             mandatory_node_ids=mandatory_node_ids,
         )
-        packed_ranked = _apply_packaging(ranked, pivot_node_ids, skeleton_node_ids)
+        packed_ranked = _apply_packaging(
+            ranked,
+            pivot_node_ids,
+            skeleton_node_ids,
+            compact_node_ids,
+            query=query,
+            intent=intent,
+            query_shape=query_shape,
+            mandatory_node_ids=mandatory_node_ids,
+        )
         payload = build_context(
             query,
             packed_ranked,
@@ -2341,7 +2802,6 @@ def run_context(path: str, query: str, budget: int | None, intent: str | None, t
             intent=intent,
             mandatory_node_ids=mandatory_node_ids,
         )
-
     snippets_out: list[dict[str, object]] = []
     for snippet in payload.snippets:
         base_meta = attached.get(
@@ -2412,7 +2872,7 @@ def _adaptive_companion_candidates(
         same_family = _candidate_family(path) in anchor_families
         role = _file_role(path)
         score = path_score
-        score += _content_match_score(text[:4000], query)
+        score += _content_match_score(text[:2000], query)
         score += _class_weight(path, query, intent)
         score += _support_role_bonus(path, query, anchors, file_text)
         score += _adjacency_boost(path, query, intent, anchors, file_text)
@@ -2500,7 +2960,7 @@ def run_context_adaptive(
         node_id = f"file:{rel_path}"
         if node_id in existing_ids:
             continue
-        content = _snippet_from_lines(file_text.get(rel_path, "").splitlines(), max_lines=60)
+        content = _snippet_from_lines(file_text.get(rel_path, "").splitlines(), max_lines=24)
         if not content:
             continue
         token_cost = estimate_tokens(content)
@@ -2537,6 +2997,42 @@ def run_context_adaptive(
     payload["adaptive_completion_reason"] = "missing_referenced_companion" if added else None
     payload["adaptive_missing_files"] = added
     return payload
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

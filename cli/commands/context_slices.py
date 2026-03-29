@@ -334,7 +334,7 @@ def _missing_target_segments(missing_targets: list[str]) -> list[str]:
 
 def _family_defaults(family: str) -> dict:
     base = _DEFAULT_FAMILY_BUDGETS.get(family, _DEFAULT_FAMILY_BUDGETS["default"])
-    return {"stage_a": int(base["stage_a"]), "stage_b": int(base["stage_b"]), "max_total": int(base["max_total"]), "preferred_slices": []}
+    return {"stage_a": int(base["stage_a"]), "stage_b": int(base["stage_b"]), "max_total": int(base["max_total"]), "preferred_slices": [], "best_success": None}
 
 
 def _resolve_adaptive_settings(repo_path: Path, family: str) -> dict:
@@ -360,6 +360,11 @@ def _resolve_adaptive_settings(repo_path: Path, family: str) -> dict:
     if isinstance(slices, list):
         out["preferred_slices"] = [str(item) for item in slices if str(item) not in _NON_LEARNABLE_SEGMENTS][:3]
 
+    best_success = learned.get("best_success")
+    if isinstance(best_success, dict) and runs >= 2 and hit_rate >= 0.80:
+        out["stage_a"] = min(out["stage_a"], int(best_success.get("stage_a", out["stage_a"])))
+        out["stage_b"] = min(out["stage_b"], int(best_success.get("stage_b", out["stage_b"])))
+        out["max_total"] = min(out["max_total"], int(best_success.get("max_total", out["max_total"])))
     # If miss streak is active, hold stage_a and use stable safety floor for retries.
     if consecutive_misses >= 2:
         out["stage_a"] = max(defaults["stage_a"], out["stage_a"])
@@ -922,6 +927,7 @@ def _update_adaptive_profile(
             "preferred_slice_counts": {},
             "consecutive_hits": 0,
             "consecutive_misses": 0,
+            "best_success": None,
         }
 
     tokens = int(payload.get("token_estimate", 0) or 0)
@@ -974,6 +980,32 @@ def _update_adaptive_profile(
     if hit:
         consecutive_hits += 1
         consecutive_misses = 0
+
+        best_success = family_entry.get("best_success")
+        candidate_success = {
+            "stage_a": int(stage_a_budget),
+            "stage_b": int(stage_b_budget),
+            "max_total": int(max_total),
+            "tokens": int(tokens),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        replace_best = not isinstance(best_success, dict)
+        if isinstance(best_success, dict):
+            best_tokens = int(best_success.get("tokens", 0) or 0)
+            best_max = int(best_success.get("max_total", max_total) or max_total)
+            current_tokens = int(candidate_success["tokens"])
+            current_max = int(candidate_success["max_total"])
+            if best_tokens <= 0 or current_tokens < best_tokens or (current_tokens == best_tokens and current_max < best_max):
+                replace_best = True
+        if replace_best:
+            family_entry["best_success"] = candidate_success
+
+        best_success = family_entry.get("best_success")
+        if isinstance(best_success, dict):
+            learned_a = min(learned_a, int(best_success.get("stage_a", learned_a)))
+            learned_b = min(learned_b, int(best_success.get("stage_b", learned_b)))
+            learned_total = min(learned_total, int(best_success.get("max_total", learned_total)))
+
         # Stability-gated step-down: only after 3 consecutive successful runs.
         if consecutive_hits >= 3 and hit_rate >= 0.90:
             learned_a -= 25
@@ -1280,6 +1312,16 @@ def run_context_slices_normal(
         "missing_required_slices": sorted(missing),
         "missing_required_slices_after": sorted(missing_after),
     }
+
+
+
+
+
+
+
+
+
+
 
 
 
