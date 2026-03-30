@@ -38,8 +38,13 @@ gcie.cmd adaptive-profile . --clear
 ```
 
 Post-init adaptation pipeline:
+- run from the target repo root (cd <repo> first); use . as scope
+- adaptation now bootstraps per-family method defaults before accuracy rounds (plain/plain-gapfill/plain-rescue/slices)
+- adaptation case generation is mixed by design (single-file, same-layer pairs, cross-subtree pairs, and some 3-file chains on larger runs)
 ```powershell
 gcie.cmd adapt . --benchmark-size 10 --efficiency-iterations 5 --clear-profile
+# mixed-layer repos: use wider calibration
+gcie.cmd adapt . --benchmark-size 25 --efficiency-iterations 5 --clear-profile
 ```
 
 One-shot setup + adaptation:
@@ -148,7 +153,7 @@ When retrieval is weak, apply in this exact order:
 1. Query upgrade: add explicit files, symbols, caller/entry anchor
 2. Scope correction: subtree vs root
 3. One profile/budget escalation
-4. Targeted gap-fill for only missing must-have file(s)
+4. Targeted gap-fill for only missing must-have file(s), preferring direct file-path scope first
 5. Multi-hop decomposition only if still incomplete
 
 Stop condition:
@@ -189,6 +194,29 @@ gcie.cmd index .
 - Proceed to calibration only after coverage is reachable with stable behavior.
 - If not reachable, keep safer fallback mode for affected families and continue tracking.
 
+## Calibration Quality Gate (Cross-Repo, Required)
+
+Before accepting adaptation results, verify calibration quality:
+
+1. Family diversity floor:
+- the generated benchmark set should cover at least 3 task families when the repo has multiple top-level subsystems
+- if adaptation output is dominated by only `single_file` and `same_layer_pair`, treat it as underfit
+
+2. Underfit recovery:
+- rerun adaptation with wider calibration
+```powershell
+gcie.cmd adapt . --benchmark-size 25 --efficiency-iterations 5 --clear-profile
+```
+- keep `benchmark-size 10` only for small/single-layer repos or quick smoke checks
+
+3. Accuracy-first acceptance:
+- do not accept a profile below `100%` full-hit if a recoverable path exists
+- run one rescue cycle (query upgrade -> scope correction -> one budget/profile rung -> targeted gap-fill)
+- only then finalize family defaults
+
+4. Cost lock sanity:
+- if selected profile is much more expensive than cheapest (`>40%` token delta), keep status as cost-risk and continue family-level refinement
+- do not freeze expensive global defaults unless they are uniquely required for `100%`
 ## Automatic Post-Trigger Adaptation (Required)
 
 After trigger detection in a repo session:
@@ -288,3 +316,87 @@ query -> scope -> profile/budget escalation -> targeted gap-fill -> rg fallback.
 1. This file is intentionally generalized and adaptive for any repo.
 2. Keep repo-specific tuning in learned overrides and `.gcie` state, not in global defaults.
 3. If in doubt, choose the higher-accuracy path first, then optimize tokens after lock.
+
+## Cross-Repo Adaptation Rules (Required)
+
+Use these rules to keep adaptation portable across repositories.
+
+1. Adaptation case source must be repo-local:
+- Prefer generated cases from actual files in the target repo.
+- Do not rely on hardcoded expected files from another codebase family.
+- If report `case_source` is not repo-local, treat the run as invalid.
+
+2. Accuracy lock is required, but selection must be cost-aware:
+- First gate: `100%` must-have full-hit.
+- If multiple candidates pass `100%`, choose the lowest `tokens_per_expected_hit`.
+- Do not keep `slices` as active default when a `plain` candidate also has `100%` and is cheaper.
+
+3. Near-miss rescue before expensive lock-in:
+- If a cheaper candidate is below lock by one file/family (for example `90%`), run a short rescue cycle before accepting an expensive `100%` candidate:
+  1) targeted gap-fill for missing must-have file(s)
+  2) scope correction (subtree if clustered)
+  3) one budget rung increase
+- Re-evaluate after rescue; prefer the cheaper candidate if it reaches `100%`.
+
+4. Cost sanity guardrail:
+- If selected active candidate is `>40%` more expensive than the cheapest candidate, mark status `accuracy_locked_but_cost_risky` and continue family-level refinement.
+- Keep accuracy lock, but do not finalize global defaults until cost risk is reduced.
+
+5. Family-scoped finalization:
+- Finalize routing per family, not as one global winner.
+- Example: keep `slices` only for families where it is uniquely required for `100%`; use `plain` on families where it is cheaper at equal hit rate.
+
+6. Required report checks each run:
+- `case_source`
+- `full_hit_rate_pct`
+- `tokens_per_query`
+- `tokens_per_expected_hit`
+- token delta between selected candidate and cheapest candidate
+
+## Portable Validation Checklist (Any New Repo)
+
+After running adaptation:
+1. Confirm `status: ok`.
+2. Confirm `case_source: generated_repo_local`.
+3. Confirm `full_hit_rate_pct: 100` for selected final profile.
+4. Compare selected profile vs cheapest candidate:
+- if selected is much more expensive, run one rescue iteration.
+5. Run a 50-query unique validation before trusting defaults broadly.
+
+Commands:
+```powershell
+gcie.cmd adapt . --benchmark-size 10 --efficiency-iterations 5 --clear-profile
+# mixed-layer repos: use wider calibration
+gcie.cmd adapt . --benchmark-size 25 --efficiency-iterations 5 --clear-profile
+```
+```powershell
+gcie.cmd adapt . --benchmark-size 10 --efficiency-iterations 5
+```
+
+
+## Remove GCIE From A Repo
+
+To remove GCIE-managed files from the current repo:
+
+```powershell
+gcie.cmd remove .
+```
+
+Options:
+- keep `GCIE_USAGE.md`: `--keep-usage`
+- keep `SETUP_ANY_REPO.md`: `--keep-setup-doc`
+- also remove `.planning` artifacts: `--remove-planning`
+
+Example:
+
+```powershell
+gcie.cmd remove . --remove-planning
+```
+
+
+
+
+
+
+
+

@@ -14,7 +14,7 @@ from .commands.context_slices import adaptive_profile_summary, clear_adaptive_pr
 from .commands.debug import run_debug
 from .commands.index import run_index
 from .commands.query import run_query
-from .commands.setup import run_setup
+from .commands.setup import run_remove, run_setup
 
 app = typer.Typer(help="GraphCode Intelligence Engine CLI")
 
@@ -143,12 +143,14 @@ def adapt_cmd(
     benchmark_size: int = typer.Option(10, "--benchmark-size"),
     efficiency_iterations: int = typer.Option(5, "--efficiency-iterations"),
     clear_profile: bool = typer.Option(False, "--clear-profile"),
+    adapt_workers: int = typer.Option(0, "--adapt-workers", help="Adaptation evaluation workers (0=auto)"),
 ) -> None:
     result = run_post_init_adaptation(
         repo,
         benchmark_size=benchmark_size,
         efficiency_iterations=efficiency_iterations,
         clear_profile=clear_profile,
+        adapt_workers=(None if adapt_workers <= 0 else adapt_workers),
     )
     typer.echo(json.dumps(result, indent=2))
 
@@ -163,6 +165,7 @@ def setup_cmd(
     adapt: bool = typer.Option(False, "--adapt", help="Run post-init adaptation pipeline after setup"),
     adaptation_benchmark_size: int = typer.Option(10, "--adapt-benchmark-size"),
     adaptation_efficiency_iterations: int = typer.Option(5, "--adapt-efficiency-iterations"),
+    adaptation_workers: int = typer.Option(0, "--adapt-workers", help="Adaptation evaluation workers (0=auto)"),
 ) -> None:
     result = run_setup(
         path,
@@ -173,9 +176,25 @@ def setup_cmd(
         run_adaptation_pass=adapt,
         adaptation_benchmark_size=adaptation_benchmark_size,
         adaptation_efficiency_iterations=adaptation_efficiency_iterations,
+        adaptation_workers=(None if adaptation_workers <= 0 else adaptation_workers),
     )
     typer.echo(json.dumps(result, indent=2))
 
+
+@app.command("remove")
+def remove_cmd(
+    path: str = typer.Argument("."),
+    remove_planning: bool = typer.Option(False, "--remove-planning", help="Also remove .planning artifacts"),
+    keep_usage: bool = typer.Option(False, "--keep-usage", help="Keep GCIE_USAGE.md in place"),
+    keep_setup_doc: bool = typer.Option(False, "--keep-setup-doc", help="Keep SETUP_ANY_REPO.md in place"),
+) -> None:
+    result = run_remove(
+        path,
+        remove_planning=remove_planning,
+        remove_gcie_usage=not keep_usage,
+        remove_setup_doc=not keep_setup_doc,
+    )
+    typer.echo(json.dumps(result, indent=2))
 
 @app.command("cache-clear")
 def cache_clear_cmd(path: str = typer.Argument(".")) -> None:
@@ -197,3 +216,6 @@ def cache_warm_cmd(path: str = typer.Argument(".")) -> None:
 
 if __name__ == "__main__":
     app()
+
+
+

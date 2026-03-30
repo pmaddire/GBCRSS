@@ -8,34 +8,32 @@ whole directories into the model.
 
 ## How It Works
 
-GCIE builds a retrieval-oriented view of a repository and then composes context
-from several signals:
+GCIE is an adaptive context retrieval engine for coding agents.
 
-1. Repository scan
-   - discovers source files, frontend files, config files, and selected docs
-2. Graph and index construction
-   - structure and relationship data
-   - semantic search index
-   - architecture-oriented metadata where available
-3. Multi-channel retrieval
-   - lexical filename/path/content matching
-   - semantic vector matching
-   - query expansion for code and system terms
-   - adjacency/support-file recovery
-4. Fusion and reranking
-   - merges candidates with stable deterministic ordering
-   - boosts exact file mentions, wiring files, and intent-relevant code
-5. Context packing
-   - returns compact snippets or file-level context depending on the task
-   - preserves important support files when confidence would otherwise be weak
-6. Fallback
-   - if the optimized path looks insufficient, GCIE can recover extra files via
-     a broader fallback search instead of silently returning thin context
+At a high level:
 
-The practical goal is simple: return the implementation file, the wiring file,
-and the nearest supporting files that explain behavior, while avoiding the token
-cost of sending full repo surfaces to the model.
+1. Index + architecture snapshot
+   - `gcie index .` scans the repo and builds retrieval artifacts under `.gcie/`.
+   - GCIE tracks architecture/retrieval state so it can route future queries better.
 
+2. Query classification
+   - `gcie context` classifies each request by intent and structure (single-file, same-layer pair, cross-layer, multi-hop).
+
+3. Retrieval routing
+   - GCIE chooses retrieval strategy (`plain`, `plain_gapfill`, `plain_chain`, or slices where useful), path scope, and token budget.
+   - `--budget auto` uses built-in heuristics; explicit budgets are available when needed.
+
+4. Gap-fill + must-have recovery
+   - If expected support files are missing, GCIE runs targeted follow-up retrieval to recover must-have files instead of over-fetching whole repo context.
+
+5. Adaptation loop (optional but recommended)
+   - `gcie adapt .` benchmarks repo-local cases, selects per-family methods, and runs efficiency trials under an accuracy gate.
+   - Results are written to `.planning/post_init_adaptation_report.json` and `.gcie/context_config.json`.
+
+6. Fast path for day-to-day use
+   - After adaptation, most tasks should run through `gcie context` with small prompt footprints and high recall.
+
+The practical goal is to keep must-have coverage while minimizing token cost.
 ## Quick Start
 
 1. Create venv: `.venv\\Scripts\\python.exe -m venv .venv`
@@ -233,162 +231,86 @@ Important note:
 - `--budget 1200` consistently improved recall without needing broad manual reads
 - `1500` added more noise without materially helping more than `1200`
 
-## Core Commands
+## Command Reference
 
-- `gcie index <path>`
-- `gcie query <file.py> "<question>"`
-- `gcie debug <file.py> "<question>"`
-- `gcie context <repo|file> "<task>" --budget auto --intent <edit|debug|refactor|explore> --mode basic`
-- `gcie context-slices <repo> "<task>" --intent <edit|debug|refactor|explore> [--profile recall|low] [--stage-a 400] [--stage-b 800] [--max-total 1200] [--pin frontend/src/App.jsx] [--pin-budget 300] [--include-tests]`
+Use `gcie` or `gcie.cmd` on Windows.
 
-## How To Use It
+### Setup / Lifecycle
 
-### 1. Index the repo
+- `gcie setup .`
+- `gcie setup . --force`
+- `gcie setup . --no-index`
+- `gcie setup . --adapt --adapt-benchmark-size 25 --adapt-efficiency-iterations 8 --adapt-workers 6`
+- `gcie remove .`
+- `gcie remove . --remove-planning`
+- `gcie remove . --keep-usage --keep-setup-doc`
 
-```
-gcie index .
-```
+### Index and Retrieval
 
-Re-run indexing after major structural changes.
+- `gcie index .`
+- `gcie context . "<task>" --intent edit --budget auto --mode adaptive`
+- `gcie context . "<task>" --intent debug --budget 1200 --mode adaptive`
+- `gcie context-slices . "<task>" --intent edit --profile recall`
+- `gcie context-slices . "<task>" --intent edit --profile low --pin frontend/src/App.jsx --pin-budget 300`
 
-### 2. Start with plain `context`
+### Adaptation and Profile State
 
-```
-gcie context . "<task>" --budget auto --intent <edit|debug|refactor|explore>
-```
+- `gcie adapt . --benchmark-size 25 --efficiency-iterations 8 --adapt-workers 6`
+- `gcie adapt . --benchmark-size 25 --efficiency-iterations 8 --adapt-workers 6 --clear-profile`
+- `gcie adaptive-profile .`
+- `gcie adaptive-profile . --clear`
 
-Recommended intent guidance:
+### Utility Commands
 
-- `edit`: making code changes
-- `debug`: tracing a bug or incorrect behavior
-- `refactor`: changing structure or interfaces
-- `explore`: understanding code without immediate edits
-
-### 3. For cross-layer or wiring-heavy tasks, prefer a file-first query
-
-This works better than abstract phrasing:
-
-```
-gcie context . "frontend/src/App.jsx selectedTheme activeJobId /api/convert/start app.py start_convert" --budget 1200 --intent edit
-```
-
-Good query ingredients:
-
-- explicit file names
-- endpoint names
-- prop names
-- function names
-- config keys
-- state variables
-
-### 4. Use `context-slices` when you want the recall-first workflow
-
-```
-gcie context-slices . "<task>" --intent <edit|debug|refactor|explore>
-```
-
-Optional flags: `--profile low`, `--include-tests`, `--pin <path>`, `--max-total 1200`.
-
-### 5. Verify before editing
-
-GCIE should be treated as context compression, not final truth. For important
-edits, verify the returned context with a targeted local search:
-
-```
-rg -n "<key symbols>" app.py main.py frontend/src/App.jsx
-```
-
-## Usage Patterns That Work Best
-
-### Simple local tasks
-
-Use:
-
-```
-gcie context . "<task>" --budget auto --intent debug
-```
-
-### Cross-layer frontend/backend tasks
-
-Use:
-
-```
-gcie context . "<file-first symbol-rich query>" --budget 1200 --intent edit
-```
-
-Why:
-
-- the extra budget improves recall for wiring files
-- file-first phrasing reduces generic entrypoint noise
-
-### High-recall workflows
-
-Use:
-
-```
-gcie context-slices . "<task>" --intent edit --pin <expected wiring file>
-```
-
-This is still the safest mode when you already know a few must-have files.
-
-## Agent Workflow
-
-For coding agents, the safest practical pattern is:
-
-1. Run GCIE first
-2. Check that the result includes:
-   - the main implementation file
-   - the wiring or entry file
-   - at least one validation or test surface when relevant
-3. If a must-have file is missing:
-   - rerun with a more file-first query
-   - increase budget to `1000` or `1200`
-   - or pin the missing file in `context-slices`
-4. Verify with `rg` before editing
-
-This usually gives a much better accuracy/token tradeoff than broad manual file
-reading.
-
-## Cache
-
-Repo-wide context is cached to speed up repeated calls.
-
-- `gcie cache-warm .`
+- `gcie query <path> "<question>"`
+- `gcie debug <path> "<question>"`
 - `gcie cache-status .`
+- `gcie cache-warm .`
 - `gcie cache-clear .`
 
-Cache file: `.gcie/cache/context_cache.json` (auto-invalidated on file changes).
+## Recommended Workflow
 
-## Frontend and Non-Python Files
-
-Repo-wide context scans common frontend and config extensions and adds file nodes so
-queries can retrieve non-Python surfaces when relevant.
-
-Default extensions include: `.js`, `.jsx`, `.ts`, `.tsx`, `.css`, `.scss`, `.html`, `.vue`,
-plus `.json`, `.yaml`, `.yml`, `.toml`, `.md`, `.txt`.
-
-## Core Capabilities
-
-- Repository scanning
-- Graph construction (structure, call, variable, execution, git, test coverage)
-- Symbolic + semantic + hybrid retrieval
-- Bug localization
-- Minimal LLM context building
-- Architecture-aware context routing and fallback
-- Agent-friendly retrieval for edit/debug/refactor workflows
-
-## Publish For NPX
-
-From this repo:
+### 1) Bootstrap once per repo
 
 ```powershell
-npm login
-npm publish --access public
+gcie setup . --adapt --adapt-benchmark-size 25 --adapt-efficiency-iterations 8 --adapt-workers 6
 ```
 
-Then users can run:
+### 2) Day-to-day retrieval
 
 ```powershell
-npx -y @pmaddire/gcie@latest setup .
+gcie context . "<task>" --intent edit --budget auto --mode adaptive
 ```
 
+For cross-layer flows, use file-first symbol-rich queries and optionally pin budget:
+
+```powershell
+gcie context . "frontend/src/App.jsx selectedTheme /api/convert/start app.py start_convert" --intent edit --budget 1200 --mode adaptive
+```
+
+### 3) Verify before edits on critical changes
+
+```powershell
+rg -n "<symbol1>|<symbol2>|<symbol3>" .
+```
+
+### 4) Re-adapt only when needed
+
+Use adaptation again after large refactors, architecture shifts, or repeated recall misses:
+
+```powershell
+gcie adapt . --benchmark-size 25 --efficiency-iterations 8 --adapt-workers 6
+```
+
+If adaptation quality drifts due stale profile state, reset first:
+
+```powershell
+gcie adaptive-profile . --clear
+gcie adapt . --benchmark-size 25 --efficiency-iterations 8 --adapt-workers 6 --clear-profile
+```
+
+## Notes
+
+- `requested_benchmark_size` can be higher than `benchmark_size` used when fewer unique repo-local benchmark cases are available.
+- `status: accuracy_locked_but_cost_risky` can appear when the selected 100%-accuracy policy is compared against a cheaper but lower-accuracy baseline.
+- Primary success criteria remain must-have coverage and pass rate; optimize cost after lock.
